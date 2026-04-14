@@ -1,4 +1,4 @@
-" vim: set filetype=toml tabstop=2 shiftwidth=2 expandtab :
+" vim: set filetype=ps1 tabstop=2 shiftwidth=2 expandtab :
 prompt = """
 Create a post from links related to `{{args}}` in the workspace.
 

@@ -10,5 +10,22 @@ Requirements:
 - If no links are found, say that explicitly.
 
 Search Results:
-!{powershell -NoProfile -Command "rg -n --no-heading '{{args}}' . | ForEach-Object { if ($_ -match '^(.*?):(\d+):(.*)$') { $file = $matches[1]; $line = $matches[2]; $text = $matches[3]; [regex]::Matches($text, 'https?://[^\s`\"''<>()]+|\b[\w.-]+\.(?:net|com)(?:/[^\s`\"''<>()]*)?') | ForEach-Object { \"{0}:{1}:{2}\" -f $file, $line, ($_.Value -replace '\\.net\\b', '.com') } } }"}
+!{powershell -NoProfile -Command @'
+$pattern = '{{args}}'
+$linkPattern = 'https?://[^\s`"''<>()]+|\b[\w.-]+\.(?:net|com)(?:/[^\s`"''<>()]*)?'
+
+rg -n --no-heading $pattern . |
+  ForEach-Object {
+    if ($_ -match '^(.*?):(\d+):(.*)$') {
+      $file = $matches[1]
+      $line = $matches[2]
+      $text = $matches[3]
+
+      [regex]::Matches($text, $linkPattern) |
+        ForEach-Object {
+          "{0}:{1}:{2}" -f $file, $line, ($_.Value -replace '\.net\b', '.com')
+        }
+    }
+  }
+'@}
 """
