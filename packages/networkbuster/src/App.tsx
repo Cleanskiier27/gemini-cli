@@ -1,8 +1,16 @@
-import { FormEvent, useState } from 'react';
+/**
+ * @license
+ * Copyright 2026 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
-function App() {
+import { type FormEvent, useState } from 'react';
+
+export function App() {
   const [url, setUrl] = useState('https://example.com');
-  const [result, setResult] = useState<string>('Ready to test network requests.');
+  const [result, setResult] = useState<string>(
+    'Ready to test network requests.',
+  );
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -24,12 +32,14 @@ function App() {
 
       setResult(
         `Status: ${response.status} ${response.statusText}\n` +
-        `Content-Type: ${response.headers.get('content-type') ?? 'unknown'}\n\n` +
-        body +
-        (text.length > 2000 ? '\n\n...output truncated...' : '')
+          `Content-Type: ${response.headers.get('content-type') ?? 'unknown'}\n\n` +
+          body +
+          (text.length > 2000 ? '\n\n...output truncated...' : ''),
       );
     } catch (error) {
-      setResult(`Request failed: ${error instanceof Error ? error.message : String(error)}`);
+      setResult(
+        `Request failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     } finally {
       setLoading(false);
     }
@@ -56,5 +66,3 @@ function App() {
     </>
   );
 }
-
-export default App;
