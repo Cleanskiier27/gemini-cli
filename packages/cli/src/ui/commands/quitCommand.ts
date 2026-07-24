@@ -12,13 +12,17 @@ export const quitCommand: SlashCommand = {
   altNames: ['exit'],
   description: 'Exit the cli',
   kind: CommandKind.BUILT_IN,
-  action: (context) => {
+  autoExecute: true,
+  action: (context, args) => {
     const now = Date.now();
     const { sessionStartTime } = context.session.stats;
     const wallDuration = now - sessionStartTime.getTime();
 
+    const deleteSession = args.trim() === '--delete';
+
     return {
       type: 'quit',
+      deleteSession,
       messages: [
         {
           type: 'user',

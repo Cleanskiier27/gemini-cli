@@ -4,28 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { lerp } from '../../utils/math.js';
-import { type LoadedSettings } from '../../config/settings.js';
-
-const getMainAreaWidthInternal = (terminalWidth: number): number => {
-  if (terminalWidth <= 80) {
-    return Math.round(0.98 * terminalWidth);
-  }
-  if (terminalWidth >= 132) {
-    return Math.round(0.9 * terminalWidth);
-  }
-
-  // Linearly interpolate between 80 columns (98%) and 132 columns (90%).
-  const t = (terminalWidth - 80) / (132 - 80);
-  const percentage = lerp(98, 90, t);
-
-  return Math.round(percentage * terminalWidth * 0.01);
-};
+import type { Config } from '@google/gemini-cli-core';
+import { isAlternateBufferEnabled } from '../hooks/useAlternateBuffer.js';
 
 export const calculateMainAreaWidth = (
   terminalWidth: number,
-  settings: LoadedSettings,
-): number =>
-  settings.merged.ui?.useFullWidth
-    ? terminalWidth
-    : getMainAreaWidthInternal(terminalWidth);
+  config: Config,
+): number => {
+  if (isAlternateBufferEnabled(config)) {
+    return terminalWidth - 1;
+  }
+  return terminalWidth;
+};

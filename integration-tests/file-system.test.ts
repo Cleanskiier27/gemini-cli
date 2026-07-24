@@ -4,20 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
-import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
+import {
+  TestRig,
+  printDebugInfo,
+  assertModelHasOutput,
+  checkModelOutputContent,
+} from './test-helper.js';
 
 describe('file-system', () => {
+  let rig: TestRig;
+
+  beforeEach(() => {
+    rig = new TestRig();
+  });
+
+  afterEach(async () => await rig.cleanup());
+
   it('should be able to read a file', async () => {
-    const rig = new TestRig();
-    await rig.setup('should be able to read a file');
+    await rig.setup('should be able to read a file', {
+      settings: { tools: { core: ['read_file'] } },
+    });
     rig.createFile('test.txt', 'hello world');
 
-    const result = await rig.run(
-      `read the file test.txt and show me its contents`,
-    );
+    const result = await rig.run({
+      args: `read the file test.txt and show me its contents`,
+    });
 
     const foundToolCall = await rig.waitForToolCall('read_file');
 
@@ -34,16 +48,22 @@ describe('file-system', () => {
       'Expected to find a read_file tool call',
     ).toBeTruthy();
 
-    // Validate model output - will throw if no output, warn if missing expected content
-    validateModelOutput(result, 'hello world', 'File read test');
+    assertModelHasOutput(result);
+    checkModelOutputContent(result, {
+      expectedContent: 'hello world',
+      testName: 'File read test',
+    });
   });
 
-  it('should be able to write a file', async () => {
-    const rig = new TestRig();
-    await rig.setup('should be able to write a file');
+  it('should be able to write a hello world message to a file', async () => {
+    await rig.setup('should be able to write a hello world message to a file', {
+      settings: { tools: { core: ['write_file', 'replace', 'read_file'] } },
+    });
     rig.createFile('test.txt', '');
 
-    const result = await rig.run(`edit test.txt to have a hello world message`);
+    const result = await rig.run({
+      args: `edit test.txt to have a hello world message`,
+    });
 
     // Accept multiple valid tools for editing files
     const foundToolCall = await rig.waitForAnyToolCall([
@@ -62,8 +82,8 @@ describe('file-system', () => {
       'Expected to find a write_file, edit, or replace tool call',
     ).toBeTruthy();
 
-    // Validate model output - will throw if no output
-    validateModelOutput(result, null, 'File write test');
+    assertModelHasOutput(result);
+    checkModelOutputContent(result, { testName: 'File write test' });
 
     const fileContent = rig.readFile('test.txt');
 
@@ -94,11 +114,15 @@ describe('file-system', () => {
   });
 
   it('should correctly handle file paths with spaces', async () => {
-    const rig = new TestRig();
-    await rig.setup('should correctly handle file paths with spaces');
+    await rig.setup('should correctly handle file paths with spaces', {
+      settings: { tools: { core: ['write_file', 'read_file'] } },
+    });
     const fileName = 'my test file.txt';
 
-    const result = await rig.run(`write "hello" to "${fileName}"`);
+    const result = await rig.run({
+      args: `write "hello" to "${fileName}" and then stop. Do not perform any other actions.`,
+      timeout: 600000, // 10 min — real LLM can be slow in Docker sandbox
+    });
 
     const foundToolCall = await rig.waitForToolCall('write_file');
     if (!foundToolCall) {
@@ -110,17 +134,20 @@ describe('file-system', () => {
     ).toBeTruthy();
 
     const newFileContent = rig.readFile(fileName);
-    expect(newFileContent).toBe('hello');
+    // Trim to tolerate models that idiomatically append a trailing newline.
+    // This test is about path-with-spaces handling, not whitespace fidelity.
+    expect(newFileContent.trim()).toBe('hello');
   });
 
   it('should perform a read-then-write sequence', async () => {
-    const rig = new TestRig();
-    await rig.setup('should perform a read-then-write sequence');
+    await rig.setup('should perform a read-then-write sequence', {
+      settings: { tools: { core: ['read_file', 'replace', 'write_file'] } },
+    });
     const fileName = 'version.txt';
     rig.createFile(fileName, '1.0.0');
 
     const prompt = `Read the version from ${fileName} and write the next version 1.0.1 back to the file.`;
-    const result = await rig.run(prompt);
+    const result = await rig.run({ args: prompt });
 
     await rig.waitForTelemetryReady();
     const toolLogs = rig.readToolLogs();
@@ -145,20 +172,19 @@ describe('file-system', () => {
     ).toBeDefined();
 
     const newFileContent = rig.readFile(fileName);
-    expect(newFileContent).toBe('1.0.1');
+    expect(newFileContent.trimEnd()).toBe('1.0.1');
   });
 
   it.skip('should replace multiple instances of a string', async () => {
-    const rig = new TestRig();
     rig.setup('should replace multiple instances of a string');
     const fileName = 'ambiguous.txt';
     const fileContent = 'Hey there, \ntest line\ntest line';
     const expectedContent = 'Hey there, \nnew line\nnew line';
     rig.createFile(fileName, fileContent);
 
-    const result = await rig.run(
-      `rewrite the file ${fileName} to replace all instances of "test line" with "new line"`,
-    );
+    const result = await rig.run({
+      args: `rewrite the file ${fileName} to replace all instances of "test line" with "new line"`,
+    });
 
     const validTools = ['write_file', 'edit'];
     const foundToolCall = await rig.waitForAnyToolCall(validTools);
@@ -201,13 +227,15 @@ describe('file-system', () => {
   });
 
   it('should fail safely when trying to edit a non-existent file', async () => {
-    const rig = new TestRig();
     await rig.setup(
       'should fail safely when trying to edit a non-existent file',
+      { settings: { tools: { core: ['read_file', 'replace'] } } },
     );
     const fileName = 'non_existent.txt';
 
-    const result = await rig.run(`In ${fileName}, replace "a" with "b"`);
+    const result = await rig.run({
+      args: `In ${fileName}, replace "a" with "b"`,
+    });
 
     await rig.waitForTelemetryReady();
     const toolLogs = rig.readToolLogs();

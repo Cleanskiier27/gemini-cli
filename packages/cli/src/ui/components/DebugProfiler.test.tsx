@@ -6,17 +6,27 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { appEvents, AppEvent } from '../../utils/events.js';
+import { coreEvents } from '@google/gemini-cli-core';
 import {
   profiler,
+  DebugProfiler,
   ACTION_TIMESTAMP_CAPACITY,
   FRAME_TIMESTAMP_CAPACITY,
 } from './DebugProfiler.js';
+import { render } from '../../test-utils/render.js';
+import { useUIState, type UIState } from '../contexts/UIStateContext.js';
 import { FixedDeque } from 'mnemonist';
 import { debugState } from '../debug.js';
+import { act } from 'react';
+
+vi.mock('../contexts/UIStateContext.js', () => ({
+  useUIState: vi.fn(),
+}));
 
 describe('DebugProfiler', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    profiler.profilersActive = 1;
     profiler.numFrames = 0;
     profiler.totalIdleFrames = 0;
     profiler.lastFrameStartTime = 0;
@@ -211,5 +221,85 @@ describe('DebugProfiler', () => {
     profiler.checkForIdleFrames();
 
     expect(profiler.totalIdleFrames).toBe(0);
+  });
+});
+
+describe('DebugProfiler Component', () => {
+  beforeEach(() => {
+    // Reset the mock implementation before each test
+    vi.mocked(useUIState).mockReturnValue({
+      showDebugProfiler: false,
+      constrainHeight: false,
+    } as unknown as UIState);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('should return null when showDebugProfiler is false', async () => {
+    vi.mocked(useUIState).mockReturnValue({
+      showDebugProfiler: false,
+      constrainHeight: false,
+    } as unknown as UIState);
+    const { lastFrame, unmount } = await render(<DebugProfiler />);
+    expect(lastFrame({ allowEmpty: true })).toBe('');
+    unmount();
+  });
+
+  it('should render stats when showDebugProfiler is true', async () => {
+    vi.mocked(useUIState).mockReturnValue({
+      showDebugProfiler: true,
+      constrainHeight: false,
+    } as unknown as UIState);
+    profiler.numFrames = 10;
+    profiler.totalIdleFrames = 5;
+    profiler.totalFlickerFrames = 2;
+
+    const { lastFrame, unmount } = await render(<DebugProfiler />);
+    const output = lastFrame();
+
+    expect(output).toContain('Renders: 10 (total)');
+    expect(output).toContain('5 (idle)');
+    expect(output).toContain('2 (flicker)');
+    unmount();
+  });
+
+  it('should report an action when a CoreEvent is emitted', async () => {
+    vi.mocked(useUIState).mockReturnValue({
+      showDebugProfiler: true,
+      constrainHeight: false,
+    } as unknown as UIState);
+
+    const reportActionSpy = vi.spyOn(profiler, 'reportAction');
+
+    const { waitUntilReady, unmount } = await render(<DebugProfiler />);
+
+    await act(async () => {
+      coreEvents.emitModelChanged('new-model');
+    });
+    await waitUntilReady();
+
+    expect(reportActionSpy).toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should report an action when an AppEvent is emitted', async () => {
+    vi.mocked(useUIState).mockReturnValue({
+      showDebugProfiler: true,
+      constrainHeight: false,
+    } as unknown as UIState);
+
+    const reportActionSpy = vi.spyOn(profiler, 'reportAction');
+
+    const { waitUntilReady, unmount } = await render(<DebugProfiler />);
+
+    await act(async () => {
+      appEvents.emit(AppEvent.SelectionWarning);
+    });
+    await waitUntilReady();
+
+    expect(reportActionSpy).toHaveBeenCalled();
+    unmount();
   });
 });

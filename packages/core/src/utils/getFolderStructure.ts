@@ -12,13 +12,20 @@ import type {
   FileDiscoveryService,
   FilterFilesOptions,
 } from '../services/fileDiscoveryService.js';
-import type { FileFilteringOptions } from '../config/constants.js';
-import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import {
+  DEFAULT_FILE_FILTERING_OPTIONS,
+  type FileFilteringOptions,
+} from '../config/constants.js';
 import { debugLogger } from './debugLogger.js';
 
 const MAX_ITEMS = 200;
 const TRUNCATION_INDICATOR = '...';
-const DEFAULT_IGNORED_FOLDERS = new Set(['node_modules', '.git', 'dist']);
+const DEFAULT_IGNORED_FOLDERS = new Set([
+  'node_modules',
+  '.git',
+  'dist',
+  '__pycache__',
+]);
 
 // --- Interfaces ---
 
@@ -106,7 +113,9 @@ async function readFullStructure(
     } catch (error: unknown) {
       if (
         isNodeError(error) &&
-        (error.code === 'EACCES' || error.code === 'ENOENT')
+        (error.code === 'EACCES' ||
+          error.code === 'ENOENT' ||
+          error.code === 'EPERM')
       ) {
         debugLogger.warn(
           `Warning: Could not read directory ${currentPath}: ${error.message}`,
@@ -114,7 +123,7 @@ async function readFullStructure(
         if (currentPath === rootPath && error.code === 'ENOENT') {
           return null; // Root directory itself not found
         }
-        // For other EACCES/ENOENT on subdirectories, just skip them.
+        // For other EACCES/ENOENT/EPERM on subdirectories, just skip them.
         continue;
       }
       throw error;
@@ -171,7 +180,7 @@ async function readFullStructure(
         const subFolderPath = path.join(currentPath, subFolderName);
 
         const isIgnored =
-          options.fileService?.shouldIgnoreFile(
+          options.fileService?.shouldIgnoreDirectory(
             subFolderPath,
             filterFileOptions,
           ) ?? false;
@@ -342,7 +351,10 @@ export async function getFolderStructure(
 
     return `${summary}\n\n${resolvedPath}${path.sep}\n${structureLines.join('\n')}`;
   } catch (error: unknown) {
-    console.error(`Error getting folder structure for ${resolvedPath}:`, error);
+    debugLogger.warn(
+      `Error getting folder structure for ${resolvedPath}:`,
+      error,
+    );
     return `Error processing directory "${resolvedPath}": ${getErrorMessage(error)}`;
   }
 }

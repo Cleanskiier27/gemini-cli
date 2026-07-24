@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ToolMessageProps } from './ToolMessage.js';
-import { ToolMessage } from './ToolMessage.js';
-import { StreamingState, ToolCallStatus } from '../../types.js';
+import { describe, it, expect } from 'vitest';
+import { type ToolMessageProps, ToolMessage } from './ToolMessage.js';
+import { StreamingState } from '../../types.js';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
 import { renderWithProviders } from '../../../test-utils/render.js';
+import { createMockSettings } from '../../../test-utils/settings.js';
+import { CoreToolCallStatus, makeFakeConfig } from '@google/gemini-cli-core';
 
 describe('<ToolMessage /> - Raw Markdown Display Snapshots', () => {
   const baseProps: ToolMessageProps = {
@@ -16,30 +18,67 @@ describe('<ToolMessage /> - Raw Markdown Display Snapshots', () => {
     name: 'test-tool',
     description: 'A tool for testing',
     resultDisplay: 'Test **bold** and `code` markdown',
-    status: ToolCallStatus.Success,
+    status: CoreToolCallStatus.Success,
     terminalWidth: 80,
     confirmationDetails: undefined,
     emphasis: 'medium',
+    isFirst: true,
+    borderColor: 'green',
+    borderDimColor: false,
   };
 
   it.each([
-    { renderMarkdown: true, description: '(default)' },
+    {
+      renderMarkdown: true,
+      useAlternateBuffer: false,
+      description: '(default, regular buffer)',
+    },
+    {
+      renderMarkdown: true,
+      useAlternateBuffer: true,
+      description: '(default, alternate buffer)',
+    },
     {
       renderMarkdown: false,
-      description: '(raw markdown with syntax highlighting, no line numbers)',
+      useAlternateBuffer: false,
+      description: '(raw markdown, regular buffer)',
+    },
+    {
+      renderMarkdown: false,
+      useAlternateBuffer: true,
+      description: '(raw markdown, alternate buffer)',
+    },
+    // Test cases where height constraint affects rendering in regular buffer but not alternate
+    {
+      renderMarkdown: true,
+      useAlternateBuffer: false,
+      availableTerminalHeight: 10,
+      description: '(constrained height, regular buffer -> forces raw)',
+    },
+    {
+      renderMarkdown: true,
+      useAlternateBuffer: true,
+      availableTerminalHeight: 10,
+      description: '(constrained height, alternate buffer -> keeps markdown)',
     },
   ])(
-    'renders with renderMarkdown=$renderMarkdown $description',
-    ({ renderMarkdown }) => {
-      const { lastFrame } = renderWithProviders(
+    'renders with renderMarkdown=$renderMarkdown, useAlternateBuffer=$useAlternateBuffer $description',
+    async ({ renderMarkdown, useAlternateBuffer, availableTerminalHeight }) => {
+      const { lastFrame, unmount } = await renderWithProviders(
         <StreamingContext.Provider value={StreamingState.Idle}>
-          <ToolMessage {...baseProps} />
+          <ToolMessage
+            {...baseProps}
+            availableTerminalHeight={availableTerminalHeight}
+          />
         </StreamingContext.Provider>,
         {
           uiState: { renderMarkdown, streamingState: StreamingState.Idle },
+          config: makeFakeConfig({ useAlternateBuffer }),
+          settings: createMockSettings({ ui: { useAlternateBuffer } }),
         },
       );
       expect(lastFrame()).toMatchSnapshot();
+      unmount();
     },
   );
 });

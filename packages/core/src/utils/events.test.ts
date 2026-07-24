@@ -1,15 +1,22 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   CoreEventEmitter,
   CoreEvent,
+  coreEvents,
+  type CoreEvents,
   type UserFeedbackPayload,
+  type McpProgressPayload,
 } from './events.js';
+
+vi.mock('./debugLogger.js', () => ({
+  debugLogger: { log: vi.fn() },
+}));
 
 describe('CoreEventEmitter', () => {
   let events: CoreEventEmitter;
@@ -46,7 +53,7 @@ describe('CoreEventEmitter', () => {
 
     // Attach listener and drain
     events.on(CoreEvent.UserFeedback, listener);
-    events.drainFeedbackBacklog();
+    events.drainBacklogs();
 
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener).toHaveBeenCalledWith(expect.objectContaining(payload));
@@ -61,7 +68,7 @@ describe('CoreEventEmitter', () => {
     }
 
     events.on(CoreEvent.UserFeedback, listener);
-    events.drainFeedbackBacklog();
+    events.drainBacklogs();
 
     expect(listener).toHaveBeenCalledTimes(MAX_BACKLOG_SIZE);
     // Verify strictly that the FIRST call was Message 10 (0-9 dropped)
@@ -77,11 +84,11 @@ describe('CoreEventEmitter', () => {
     events.emitFeedback('error', 'Test error');
 
     events.on(CoreEvent.UserFeedback, listener);
-    events.drainFeedbackBacklog();
+    events.drainBacklogs();
     expect(listener).toHaveBeenCalledTimes(1);
 
     listener.mockClear();
-    events.drainFeedbackBacklog();
+    events.drainBacklogs();
     expect(listener).not.toHaveBeenCalled();
   });
 
@@ -138,7 +145,7 @@ describe('CoreEventEmitter', () => {
     });
 
     events.on(CoreEvent.UserFeedback, listener);
-    events.drainFeedbackBacklog();
+    events.drainBacklogs();
 
     // Expectation with atomic snapshot:
     // 1. loop starts with ['Buffered 1', 'Buffered 2']
@@ -157,6 +164,166 @@ describe('CoreEventEmitter', () => {
     expect(listener.mock.calls[2][0]).toMatchObject({ message: 'Buffered 2' });
   });
 
+  describe('ConsoleLog Event', () => {
+    it('should emit console log immediately when a listener is present', () => {
+      const listener = vi.fn();
+      events.on(CoreEvent.ConsoleLog, listener);
+
+      const payload = {
+        type: 'info' as const,
+        content: 'Test log',
+      };
+
+      events.emitConsoleLog(payload.type, payload.content);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining(payload));
+    });
+
+    it('should buffer console logs when no listener is present', () => {
+      const listener = vi.fn();
+      const payload = {
+        type: 'warn' as const,
+        content: 'Buffered log',
+      };
+
+      // Emit while no listeners attached
+      events.emitConsoleLog(payload.type, payload.content);
+      expect(listener).not.toHaveBeenCalled();
+
+      // Attach listener and drain
+      events.on(CoreEvent.ConsoleLog, listener);
+      events.drainBacklogs();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining(payload));
+    });
+
+    it('should respect the backlog size limit for console logs', () => {
+      const listener = vi.fn();
+      const MAX_BACKLOG_SIZE = 10000;
+
+      for (let i = 0; i < MAX_BACKLOG_SIZE + 10; i++) {
+        events.emitConsoleLog('debug', `Log ${i}`);
+      }
+
+      events.on(CoreEvent.ConsoleLog, listener);
+      events.drainBacklogs();
+
+      expect(listener).toHaveBeenCalledTimes(MAX_BACKLOG_SIZE);
+      // Verify strictly that the FIRST call was Log 10 (0-9 dropped)
+      expect(listener.mock.calls[0][0]).toMatchObject({ content: 'Log 10' });
+    });
+  });
+
+  describe('Output Event', () => {
+    it('should emit output immediately when a listener is present', () => {
+      const listener = vi.fn();
+      events.on(CoreEvent.Output, listener);
+
+      const payload = {
+        isStderr: false,
+        chunk: 'Test output',
+        encoding: 'utf8' as BufferEncoding,
+      };
+
+      events.emitOutput(payload.isStderr, payload.chunk, payload.encoding);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining(payload));
+    });
+
+    it('should buffer output when no listener is present', () => {
+      const listener = vi.fn();
+      const payload = {
+        isStderr: true,
+        chunk: 'Buffered output',
+      };
+
+      // Emit while no listeners attached
+      events.emitOutput(payload.isStderr, payload.chunk);
+      expect(listener).not.toHaveBeenCalled();
+
+      // Attach listener and drain
+      events.on(CoreEvent.Output, listener);
+      events.drainBacklogs();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining(payload));
+    });
+
+    it('should respect the backlog size limit for output', () => {
+      const listener = vi.fn();
+      const MAX_BACKLOG_SIZE = 10000;
+
+      for (let i = 0; i < MAX_BACKLOG_SIZE + 10; i++) {
+        events.emitOutput(false, `Output ${i}`);
+      }
+
+      events.on(CoreEvent.Output, listener);
+      events.drainBacklogs();
+
+      expect(listener).toHaveBeenCalledTimes(MAX_BACKLOG_SIZE);
+      // Verify strictly that the FIRST call was Output 10 (0-9 dropped)
+      expect(listener.mock.calls[0][0]).toMatchObject({ chunk: 'Output 10' });
+    });
+  });
+
+  describe('drainBacklogs Transformation', () => {
+    it('should transform events during drain', () => {
+      const listener = vi.fn();
+      events.emitOutput(false, 'stdout chunk');
+      events.emitFeedback('info', 'info message');
+
+      events.on(CoreEvent.Output, listener);
+      events.on(CoreEvent.UserFeedback, listener);
+
+      events.drainBacklogs(
+        <K extends keyof CoreEvents>(event: K, args: CoreEvents[K]) => {
+          if (event === (CoreEvent.Output as string)) {
+            const payload = args[0] as { isStderr: boolean; chunk: string };
+            return {
+              event,
+              args: [
+                { ...payload, isStderr: true },
+              ] as unknown as CoreEvents[K],
+            };
+          }
+          return { event, args };
+        },
+      );
+
+      expect(listener).toHaveBeenCalledTimes(2);
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({ isStderr: true, chunk: 'stdout chunk' }),
+      );
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'info message' }),
+      );
+    });
+
+    it('should drop events when transform returns undefined', () => {
+      const listener = vi.fn();
+      events.emitOutput(false, 'drop me');
+      events.emitFeedback('info', 'keep me');
+
+      events.on(CoreEvent.Output, listener);
+      events.on(CoreEvent.UserFeedback, listener);
+
+      events.drainBacklogs((event, args) => {
+        if (event === CoreEvent.Output) {
+          return undefined;
+        }
+        return { event, args };
+      });
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'keep me' }),
+      );
+    });
+  });
+
   describe('ModelChanged Event', () => {
     it('should emit ModelChanged event with correct payload', () => {
       const listener = vi.fn();
@@ -167,6 +334,151 @@ describe('CoreEventEmitter', () => {
 
       expect(listener).toHaveBeenCalledTimes(1);
       expect(listener).toHaveBeenCalledWith({ model: newModel });
+    });
+  });
+
+  describe('Hook Events', () => {
+    it('should emit HookStart event with correct payload using helper', () => {
+      const listener = vi.fn();
+      events.on(CoreEvent.HookStart, listener);
+
+      const payload = {
+        hookName: 'test-hook',
+        eventName: 'before-agent',
+        hookIndex: 1,
+        totalHooks: 1,
+      };
+      events.emitHookStart(payload);
+
+      expect(listener).toHaveBeenCalledWith(payload);
+    });
+
+    it('should emit HookEnd event with correct payload using helper', () => {
+      const listener = vi.fn();
+      events.on(CoreEvent.HookEnd, listener);
+
+      const payload = {
+        hookName: 'test-hook',
+        eventName: 'before-agent',
+        success: true,
+      };
+      events.emitHookEnd(payload);
+
+      expect(listener).toHaveBeenCalledWith(payload);
+    });
+  });
+
+  describe('ConsentRequest Event', () => {
+    it('should emit consent request immediately when a listener is present', () => {
+      const listener = vi.fn();
+      events.on(CoreEvent.ConsentRequest, listener);
+
+      const payload = {
+        prompt: 'Do you consent?',
+        onConfirm: vi.fn(),
+      };
+
+      events.emitConsentRequest(payload);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(payload);
+    });
+
+    it('should buffer consent requests when no listener is present', () => {
+      const listener = vi.fn();
+      const payload = {
+        prompt: 'Buffered consent?',
+        onConfirm: vi.fn(),
+      };
+
+      // Emit while no listeners attached
+      events.emitConsentRequest(payload);
+      expect(listener).not.toHaveBeenCalled();
+
+      // Attach listener and drain
+      events.on(CoreEvent.ConsentRequest, listener);
+      events.drainBacklogs();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(payload);
+    });
+
+    it('should respect the backlog size limit for consent requests', () => {
+      const listener = vi.fn();
+      const MAX_BACKLOG_SIZE = 10000;
+
+      for (let i = 0; i < MAX_BACKLOG_SIZE + 10; i++) {
+        events.emitConsentRequest({
+          prompt: `Consent ${i}`,
+          onConfirm: vi.fn(),
+        });
+      }
+
+      events.on(CoreEvent.ConsentRequest, listener);
+      events.drainBacklogs();
+
+      expect(listener).toHaveBeenCalledTimes(MAX_BACKLOG_SIZE);
+      // Verify strictly that the FIRST call was Consent 10 (0-9 dropped)
+      expect(listener.mock.calls[0][0]).toMatchObject({ prompt: 'Consent 10' });
+    });
+  });
+
+  describe('emitMcpProgress validation', () => {
+    const basePayload: McpProgressPayload = {
+      serverName: 'test-server',
+      callId: 'call-1',
+      progressToken: 'token-1',
+      progress: 0,
+    };
+
+    let listener: ReturnType<typeof vi.fn>;
+
+    afterEach(() => {
+      if (listener) {
+        coreEvents.off(CoreEvent.McpProgress, listener);
+      }
+    });
+
+    it('rejects NaN progress', () => {
+      listener = vi.fn();
+      coreEvents.on(CoreEvent.McpProgress, listener);
+
+      coreEvents.emitMcpProgress({ ...basePayload, progress: NaN });
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('rejects negative progress', () => {
+      listener = vi.fn();
+      coreEvents.on(CoreEvent.McpProgress, listener);
+
+      coreEvents.emitMcpProgress({ ...basePayload, progress: -1 });
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('rejects Infinity progress', () => {
+      listener = vi.fn();
+      coreEvents.on(CoreEvent.McpProgress, listener);
+
+      coreEvents.emitMcpProgress({ ...basePayload, progress: Infinity });
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('emits valid progress payload', () => {
+      listener = vi.fn();
+      coreEvents.on(CoreEvent.McpProgress, listener);
+
+      const payload: McpProgressPayload = {
+        ...basePayload,
+        progress: 5,
+        total: 10,
+        message: 'test',
+      };
+      coreEvents.emitMcpProgress(payload);
+
+      expect(listener).toHaveBeenCalledExactlyOnceWith(payload);
     });
   });
 });

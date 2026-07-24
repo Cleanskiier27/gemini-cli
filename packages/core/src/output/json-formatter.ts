@@ -6,11 +6,22 @@
 
 import stripAnsi from 'strip-ansi';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
+import { getErrorType } from '../utils/errors.js';
 import type { JsonError, JsonOutput } from './types.js';
 
 export class JsonFormatter {
-  format(response?: string, stats?: SessionMetrics, error?: JsonError): string {
+  format(
+    sessionId?: string,
+    response?: string,
+    stats?: SessionMetrics,
+    error?: JsonError,
+    warnings?: string[],
+  ): string {
     const output: JsonOutput = {};
+
+    if (sessionId) {
+      output.session_id = sessionId;
+    }
 
     if (response !== undefined) {
       output.response = stripAnsi(response);
@@ -24,16 +35,24 @@ export class JsonFormatter {
       output.error = error;
     }
 
+    if (warnings && warnings.length > 0) {
+      output.warnings = warnings.map((w) => stripAnsi(w));
+    }
+
     return JSON.stringify(output, null, 2);
   }
 
-  formatError(error: Error, code?: string | number): string {
+  formatError(
+    error: Error,
+    code?: string | number,
+    sessionId?: string,
+  ): string {
     const jsonError: JsonError = {
-      type: error.constructor.name,
+      type: getErrorType(error),
       message: stripAnsi(error.message),
       ...(code && { code }),
     };
 
-    return this.format(undefined, undefined, jsonError);
+    return this.format(sessionId, undefined, undefined, jsonError);
   }
 }

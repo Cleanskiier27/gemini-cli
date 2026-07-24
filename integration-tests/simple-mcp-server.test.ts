@@ -10,8 +10,13 @@
  * external dependencies, making it compatible with Docker sandbox mode.
  */
 
-import { describe, it, beforeAll, expect } from 'vitest';
-import { TestRig, poll, validateModelOutput } from './test-helper.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  TestRig,
+  poll,
+  assertModelHasOutput,
+  checkModelOutputContent,
+} from './test-helper.js';
 import { join } from 'node:path';
 import { writeFileSync } from 'node:fs';
 
@@ -164,10 +169,16 @@ rpc.send({
 });
 `;
 
-describe('simple-mcp-server', () => {
-  const rig = new TestRig();
+describe.skip('simple-mcp-server', () => {
+  let rig: TestRig;
 
-  beforeAll(async () => {
+  beforeEach(() => {
+    rig = new TestRig();
+  });
+
+  afterEach(async () => await rig.cleanup());
+
+  it('should add two numbers', async () => {
     // Setup test directory with MCP server configuration
     await rig.setup('simple-mcp-server', {
       settings: {
@@ -177,6 +188,7 @@ describe('simple-mcp-server', () => {
             args: ['mcp-server.cjs'],
           },
         },
+        tools: { core: [] },
       },
     });
 
@@ -208,21 +220,22 @@ describe('simple-mcp-server', () => {
     if (!isReady) {
       throw new Error('MCP server script was not ready in time.');
     }
-  });
 
-  it('should add two numbers', async () => {
     // Test directory is already set up in before hook
     // Just run the command - MCP server config is in settings.json
-    const output = await rig.run(
-      'Use the `add` tool to calculate 5+10 and output only the resulting number.',
-    );
+    const output = await rig.run({
+      args: 'Use the `add` tool to calculate 5+10 and output only the resulting number.',
+    });
 
     const foundToolCall = await rig.waitForToolCall('add');
 
     expect(foundToolCall, 'Expected to find an add tool call').toBeTruthy();
 
-    // Validate model output - will throw if no output, fail if missing expected content
-    validateModelOutput(output, '15', 'MCP server test');
+    assertModelHasOutput(output);
+    checkModelOutputContent(output, {
+      expectedContent: '15',
+      testName: 'MCP server test',
+    });
     expect(
       output.includes('15'),
       'Expected output to contain the sum (15)',

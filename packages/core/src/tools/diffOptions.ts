@@ -7,9 +7,14 @@
 import * as Diff from 'diff';
 import type { DiffStat } from './tools.js';
 
-export const DEFAULT_DIFF_OPTIONS: Diff.PatchOptions = {
+const DEFAULT_STRUCTURED_PATCH_OPTS: Diff.StructuredPatchOptionsNonabortable = {
   context: 3,
-  ignoreWhitespace: true,
+  ignoreWhitespace: false,
+};
+
+export const DEFAULT_DIFF_OPTIONS: Diff.CreatePatchOptionsNonabortable = {
+  context: 3,
+  ignoreWhitespace: false,
 };
 
 export function getDiffStat(
@@ -18,13 +23,13 @@ export function getDiffStat(
   aiStr: string,
   userStr: string,
 ): DiffStat {
-  const getStats = (patch: Diff.ParsedDiff) => {
+  const getStats = (patch: Diff.StructuredPatch) => {
     let addedLines = 0;
     let removedLines = 0;
     let addedChars = 0;
     let removedChars = 0;
 
-    patch.hunks.forEach((hunk: Diff.Hunk) => {
+    patch.hunks.forEach((hunk: Diff.StructuredPatchHunk) => {
       hunk.lines.forEach((line: string) => {
         if (line.startsWith('+')) {
           addedLines++;
@@ -45,7 +50,7 @@ export function getDiffStat(
     aiStr,
     'Current',
     'Proposed',
-    DEFAULT_DIFF_OPTIONS,
+    DEFAULT_STRUCTURED_PATCH_OPTS,
   );
   const modelStats = getStats(modelPatch);
 
@@ -56,7 +61,7 @@ export function getDiffStat(
     userStr,
     'Proposed',
     'User',
-    DEFAULT_DIFF_OPTIONS,
+    DEFAULT_STRUCTURED_PATCH_OPTS,
   );
   const userStats = getStats(userPatch);
 
@@ -69,5 +74,41 @@ export function getDiffStat(
     user_removed_lines: userStats.removedLines,
     user_added_chars: userStats.addedChars,
     user_removed_chars: userStats.removedChars,
+  };
+}
+
+/**
+ * Extracts line and character stats from a unified diff patch string.
+ * This is useful for reconstructing stats for rejected or errored operations
+ * where the full strings may no longer be easily accessible.
+ */
+export function getDiffStatFromPatch(patch: string): DiffStat {
+  let addedLines = 0;
+  let removedLines = 0;
+  let addedChars = 0;
+  let removedChars = 0;
+
+  const lines = patch.split('\n');
+  for (const line of lines) {
+    // Only count lines that are additions or removals,
+    // excluding the diff headers (--- and +++) and metadata (\)
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      addedLines++;
+      addedChars += line.length - 1;
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      removedLines++;
+      removedChars += line.length - 1;
+    }
+  }
+
+  return {
+    model_added_lines: addedLines,
+    model_removed_lines: removedLines,
+    model_added_chars: addedChars,
+    model_removed_chars: removedChars,
+    user_added_lines: 0,
+    user_removed_lines: 0,
+    user_added_chars: 0,
+    user_removed_chars: 0,
   };
 }

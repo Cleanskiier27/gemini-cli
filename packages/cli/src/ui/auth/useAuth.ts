@@ -11,20 +11,22 @@ import {
   type Config,
   loadApiKey,
   debugLogger,
+  isAccountSuspendedError,
+  ProjectIdRequiredError,
 } from '@google/gemini-cli-core';
 import { getErrorMessage } from '@google/gemini-cli-core';
 import { AuthState } from '../types.js';
 import { validateAuthMethod } from '../../config/auth.js';
 
-export function validateAuthMethodWithSettings(
+export async function validateAuthMethodWithSettings(
   authType: AuthType,
   settings: LoadedSettings,
-): string | null {
-  const enforcedType = settings.merged.security?.auth?.enforcedType;
+): Promise<string | null> {
+  const enforcedType = settings.merged.security.auth.enforcedType;
   if (enforcedType && enforcedType !== authType) {
     return `Authentication is enforced to be ${enforcedType}, but you are currently using ${authType}.`;
   }
-  if (settings.merged.security?.auth?.useExternal) {
+  if (settings.merged.security.auth.useExternal) {
     return null;
   }
   // If using Gemini API key, we don't validate it here as we might need to prompt for it.
@@ -34,12 +36,21 @@ export function validateAuthMethodWithSettings(
   return validateAuthMethod(authType);
 }
 
-export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
+import type { AccountSuspensionInfo } from '../contexts/UIStateContext.js';
+
+export const useAuthCommand = (
+  settings: LoadedSettings,
+  config: Config,
+  initialAuthError: string | null = null,
+  initialAccountSuspensionInfo: AccountSuspensionInfo | null = null,
+) => {
   const [authState, setAuthState] = useState<AuthState>(
-    AuthState.Unauthenticated,
+    initialAuthError ? AuthState.Updating : AuthState.Unauthenticated,
   );
 
-  const [authError, setAuthError] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(initialAuthError);
+  const [accountSuspensionInfo, setAccountSuspensionInfo] =
+    useState<AccountSuspensionInfo | null>(initialAccountSuspensionInfo);
   const [apiKeyDefaultValue, setApiKeyDefaultValue] = useState<
     string | undefined
   >(undefined);
@@ -55,20 +66,32 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
   );
 
   const reloadApiKey = useCallback(async () => {
+    const envKey = process.env['GEMINI_API_KEY'];
+    if (envKey !== undefined) {
+      setApiKeyDefaultValue(envKey);
+      return envKey;
+    }
+
     const storedKey = (await loadApiKey()) ?? '';
-    const envKey = process.env['GEMINI_API_KEY'] ?? '';
-    const key = storedKey || envKey;
-    setApiKeyDefaultValue(key);
-    return key; // Return the key for immediate use
+    setApiKeyDefaultValue(storedKey);
+    return storedKey;
   }, []);
 
   useEffect(() => {
+    if (authState === AuthState.AwaitingApiKeyInput) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      reloadApiKey();
+    }
+  }, [authState, reloadApiKey]);
+
+  useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
     (async () => {
       if (authState !== AuthState.Unauthenticated) {
         return;
       }
 
-      const authType = settings.merged.security?.auth?.selectedType;
+      const authType = settings.merged.security.auth.selectedType;
       if (!authType) {
         if (process.env['GEMINI_API_KEY']) {
           onAuthError(
@@ -88,7 +111,11 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
         }
       }
 
-      const error = validateAuthMethodWithSettings(authType, settings);
+      const error = await validateAuthMethodWithSettings(
+        authType,
+        settings,
+      ).catch((e: unknown) => getErrorMessage(e));
+
       if (error) {
         onAuthError(error);
         return;
@@ -97,6 +124,7 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
       const defaultAuthType = process.env['GEMINI_DEFAULT_AUTH_TYPE'];
       if (
         defaultAuthType &&
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
         !Object.values(AuthType).includes(defaultAuthType as AuthType)
       ) {
         onAuthError(
@@ -113,7 +141,20 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
         setAuthError(null);
         setAuthState(AuthState.Authenticated);
       } catch (e) {
-        onAuthError(`Failed to login. Message: ${getErrorMessage(e)}`);
+        const suspendedError = isAccountSuspendedError(e);
+        if (suspendedError) {
+          setAccountSuspensionInfo({
+            message: suspendedError.message,
+            appealUrl: suspendedError.appealUrl,
+            appealLinkText: suspendedError.appealLinkText,
+          });
+        } else if (e instanceof ProjectIdRequiredError) {
+          // OAuth succeeded but account setup requires project ID
+          // Show the error message directly without "Failed to login" prefix
+          onAuthError(getErrorMessage(e));
+        } else {
+          onAuthError(`Failed to sign in. Message: ${getErrorMessage(e)}`);
+        }
       }
     })();
   }, [
@@ -133,5 +174,7 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
     onAuthError,
     apiKeyDefaultValue,
     reloadApiKey,
+    accountSuspensionInfo,
+    setAccountSuspensionInfo,
   };
 };

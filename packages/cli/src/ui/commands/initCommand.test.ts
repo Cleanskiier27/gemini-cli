@@ -9,13 +9,18 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { initCommand } from './initCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import type { SubmitPromptActionReturn, CommandContext } from './types.js';
+import type { CommandContext } from './types.js';
+import type { SubmitPromptActionReturn } from '@google/gemini-cli-core';
 
 // Mock the 'fs' module
-vi.mock('fs', () => ({
-  existsSync: vi.fn(),
-  writeFileSync: vi.fn(),
-}));
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    existsSync: vi.fn(),
+    writeFileSync: vi.fn(),
+  };
+});
 
 describe('initCommand', () => {
   let mockContext: CommandContext;
@@ -26,8 +31,10 @@ describe('initCommand', () => {
     // Create a fresh mock context for each test
     mockContext = createMockCommandContext({
       services: {
-        config: {
-          getTargetDir: () => targetDir,
+        agentContext: {
+          config: {
+            getTargetDir: () => targetDir,
+          },
         },
       },
     });
@@ -89,7 +96,7 @@ describe('initCommand', () => {
     // Arrange: Create a context without config
     const noConfigContext = createMockCommandContext();
     if (noConfigContext.services) {
-      noConfigContext.services.config = null;
+      noConfigContext.services.agentContext = null;
     }
 
     // Act: Run the command's action

@@ -153,7 +153,7 @@ syntax = "proto3";
 
 import "google/protobuf/struct.proto";
 
-// ToolCall is the central message represeting a tool's execution lifecycle.
+// ToolCall is the central message representing a tool's execution lifecycle.
 // The entire object is sent from the agent to client on every update.
 message ToolCall {
   // A unique identifier, assigned by the agent
@@ -197,7 +197,7 @@ enum ToolCallStatus {
   CANCELLED = 5;
 }
 
-// ToolOuput represents the final, successful, output of a tool
+// ToolOutput represents the final, successful, output of a tool
 message ToolOutput {
   oneof result {
     string text = 1;
@@ -418,7 +418,7 @@ confirmations for tool calls (like executing a shell command), will be sent as
 ```proto
 // Request to execute a specific slash command.
 message ExecuteSlashCommandRequest {
-  // The path to the command, e.g., ["memory", "add"] for /memory add
+  // The path to the command, e.g., ["memory", "list"] for /memory list
   repeated string command_path = 1;
   // The arguments for the command as a single string.
   string args = 2;

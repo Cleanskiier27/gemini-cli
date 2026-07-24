@@ -6,7 +6,7 @@
 
 import {
   IdeDiffAcceptedNotificationSchema,
-  IdeDiffClosedNotificationSchema,
+  IdeDiffRejectedNotificationSchema,
 } from '@google/gemini-cli-core/src/ide/types.js';
 import { type JSONRPCNotification } from '@modelcontextprotocol/sdk/types.js';
 import * as path from 'node:path';
@@ -62,9 +62,11 @@ export class DiffManager {
   ) {
     this.subscriptions.push(
       vscode.window.onDidChangeActiveTextEditor((editor) => {
+        // eslint-disable-next-line @typescript-eslint/no-floating-promises
         this.onActiveEditorChange(editor);
       }),
     );
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
     this.onActiveEditorChange(vscode.window.activeTextEditor);
   }
 
@@ -132,7 +134,7 @@ export class DiffManager {
   /**
    * Closes an open diff view for a specific file.
    */
-  async closeDiff(filePath: string, suppressNotification = false) {
+  async closeDiff(filePath: string) {
     let uriToClose: vscode.Uri | undefined;
     for (const [uriString, diffInfo] of this.diffDocuments.entries()) {
       if (diffInfo.originalFilePath === filePath) {
@@ -143,20 +145,8 @@ export class DiffManager {
 
     if (uriToClose) {
       const rightDoc = await vscode.workspace.openTextDocument(uriToClose);
-      const modifiedContent = rightDoc.getText();
+      const modifiedContent = rightDoc.getText() ?? '';
       await this.closeDiffEditor(uriToClose);
-      if (!suppressNotification) {
-        this.onDidChangeEmitter.fire(
-          IdeDiffClosedNotificationSchema.parse({
-            jsonrpc: '2.0',
-            method: 'ide/diffClosed',
-            params: {
-              filePath,
-              content: modifiedContent,
-            },
-          }),
-        );
-      }
       return modifiedContent;
     }
     return;
@@ -172,7 +162,7 @@ export class DiffManager {
     }
 
     const rightDoc = await vscode.workspace.openTextDocument(rightDocUri);
-    const modifiedContent = rightDoc.getText();
+    const modifiedContent = rightDoc.getText() ?? '';
     await this.closeDiffEditor(rightDocUri);
 
     this.onDidChangeEmitter.fire(
@@ -198,13 +188,13 @@ export class DiffManager {
     }
 
     const rightDoc = await vscode.workspace.openTextDocument(rightDocUri);
-    const modifiedContent = rightDoc.getText();
+    const modifiedContent = rightDoc.getText() ?? '';
     await this.closeDiffEditor(rightDocUri);
 
     this.onDidChangeEmitter.fire(
-      IdeDiffClosedNotificationSchema.parse({
+      IdeDiffRejectedNotificationSchema.parse({
         jsonrpc: '2.0',
-        method: 'ide/diffClosed',
+        method: 'ide/diffRejected',
         params: {
           filePath: diffInfo.originalFilePath,
           content: modifiedContent,
@@ -253,11 +243,10 @@ export class DiffManager {
     // Find and close the tab corresponding to the diff view
     for (const tabGroup of vscode.window.tabGroups.all) {
       for (const tab of tabGroup.tabs) {
-        const input = tab.input as {
-          modified?: vscode.Uri;
-          original?: vscode.Uri;
-        };
-        if (input && input.modified?.toString() === rightDocUri.toString()) {
+        if (
+          tab.input instanceof vscode.TabInputTextDiff &&
+          tab.input.modified.toString() === rightDocUri.toString()
+        ) {
           await vscode.window.tabGroups.close(tab);
           return;
         }

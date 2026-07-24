@@ -4,12 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import express from 'express';
+import express, { type Request } from 'express';
 
-import type { AgentCard } from '@a2a-js/sdk';
-import type { TaskStore } from '@a2a-js/sdk/server';
-import { DefaultRequestHandler, InMemoryTaskStore } from '@a2a-js/sdk/server';
-import { A2AExpressApp } from '@a2a-js/sdk/server/express'; // Import server components
+import type { AgentCard, Message } from '@a2a-js/sdk';
+import {
+  type TaskStore,
+  DefaultRequestHandler,
+  InMemoryTaskStore,
+  DefaultExecutionEventBus,
+  type AgentExecutionEvent,
+  UnauthenticatedUser,
+} from '@a2a-js/sdk/server';
+import { A2AExpressApp, type UserBuilder } from '@a2a-js/sdk/server/express'; // Import server components
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger.js';
 import type { AgentSettings } from '../types.js';
@@ -20,7 +26,13 @@ import { loadConfig, loadEnvironment, setTargetDir } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { loadExtensions } from '../config/extension.js';
 import { commandRegistry } from '../commands/command-registry.js';
-import { SimpleExtensionLoader } from '@google/gemini-cli-core';
+import {
+  debugLogger,
+  SimpleExtensionLoader,
+  GitService,
+  checkPathTrust,
+  isHeadlessMode,
+} from '@google/gemini-cli-core';
 import type { Command, CommandArgument } from '../commands/types.js';
 
 type CommandResponse = {
@@ -46,8 +58,17 @@ const coderAgentCard: AgentCard = {
     pushNotifications: false,
     stateTransitionHistory: true,
   },
-  securitySchemes: undefined,
-  security: undefined,
+  securitySchemes: {
+    bearerAuth: {
+      type: 'http',
+      scheme: 'bearer',
+    },
+    basicAuth: {
+      type: 'http',
+      scheme: 'basic',
+    },
+  },
+  security: [{ bearerAuth: [] }, { basicAuth: [] }],
   defaultInputModes: ['text'],
   defaultOutputModes: ['text'],
   skills: [
@@ -72,18 +93,157 @@ export function updateCoderAgentCardUrl(port: number) {
   coderAgentCard.url = `http://localhost:${port}/`;
 }
 
+const customUserBuilder: UserBuilder = async (req: Request) => {
+  const auth = req.headers['authorization'];
+  if (auth) {
+    const scheme = auth.split(' ')[0];
+    logger.info(
+      `[customUserBuilder] Received Authorization header with scheme: ${scheme}`,
+    );
+  }
+  if (!auth) return new UnauthenticatedUser();
+
+  // 1. Bearer Auth
+  if (auth.startsWith('Bearer ')) {
+    const token = auth.substring(7);
+    if (token === 'valid-token') {
+      return { userName: 'bearer-user', isAuthenticated: true };
+    }
+  }
+
+  // 2. Basic Auth
+  if (auth.startsWith('Basic ')) {
+    const credentials = Buffer.from(auth.substring(6), 'base64').toString();
+    if (credentials === 'admin:password') {
+      return { userName: 'basic-user', isAuthenticated: true };
+    }
+  }
+
+  return new UnauthenticatedUser();
+};
+
+async function handleExecuteCommand(
+  req: express.Request,
+  res: express.Response,
+  context: {
+    config: Awaited<ReturnType<typeof loadConfig>>;
+    git: GitService | undefined;
+    agentExecutor: CoderAgentExecutor;
+  },
+) {
+  logger.info('[CoreAgent] Received /executeCommand request: ', req.body);
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+  const { command, args } = req.body;
+  try {
+    if (typeof command !== 'string') {
+      return res.status(400).json({ error: 'Invalid "command" field.' });
+    }
+
+    if (args && !Array.isArray(args)) {
+      return res.status(400).json({ error: '"args" field must be an array.' });
+    }
+
+    const commandToExecute = commandRegistry.get(command);
+
+    if (commandToExecute?.requiresWorkspace) {
+      if (!process.env['CODER_AGENT_WORKSPACE_PATH']) {
+        return res.status(400).json({
+          error: `Command "${command}" requires a workspace, but CODER_AGENT_WORKSPACE_PATH is not set.`,
+        });
+      }
+    }
+
+    if (!commandToExecute) {
+      return res.status(404).json({ error: `Command not found: ${command}` });
+    }
+
+    if (commandToExecute.streaming) {
+      const eventBus = new DefaultExecutionEventBus();
+      res.setHeader('Content-Type', 'text/event-stream');
+      const eventHandler = (event: AgentExecutionEvent) => {
+        const jsonRpcResponse = {
+          jsonrpc: '2.0',
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+          id: 'taskId' in event ? event.taskId : (event as Message).messageId,
+          result: event,
+        };
+        res.write(`data: ${JSON.stringify(jsonRpcResponse)}\n`);
+      };
+      eventBus.on('event', eventHandler);
+
+      await commandToExecute.execute({ ...context, eventBus }, args ?? []);
+
+      eventBus.off('event', eventHandler);
+      eventBus.finished();
+      return res.end(); // Explicit return for streaming path
+    } else {
+      const result = await commandToExecute.execute(context, args ?? []);
+      logger.info('[CoreAgent] Sending /executeCommand response: ', result);
+      return res.status(200).json(result);
+    }
+  } catch (e) {
+    logger.error(
+      `Error executing /executeCommand: ${command} with args: ${JSON.stringify(
+        args,
+      )}`,
+      e,
+    );
+    const errorMessage =
+      e instanceof Error ? e.message : 'Unknown error executing command';
+    return res.status(500).json({ error: errorMessage });
+  }
+}
+
 export async function createApp() {
   try {
     // Load the server configuration once on startup.
-    const workspaceRoot = setTargetDir(undefined);
-    loadEnvironment();
-    const settings = loadSettings(workspaceRoot);
-    const extensions = loadExtensions(workspaceRoot);
+    const workspaceRoot = await setTargetDir(undefined);
+
+    // Use a temporary settings load to check if folder trust is enabled.
+    // This is similar to how the CLI handles the initial trust check.
+    const initialSettings = loadSettings(workspaceRoot, false);
+    const { isTrusted } = checkPathTrust({
+      path: workspaceRoot,
+      isFolderTrustEnabled: initialSettings.folderTrust ?? true,
+      isHeadless: isHeadlessMode(),
+    });
+
+    // Change the global working directory to the workspace root during startup
+    process.chdir(workspaceRoot);
+
+    // Load environment globally for the server startup
+    const globalEnv = await loadEnvironment(isTrusted ?? false, workspaceRoot);
+    // Only assign safe server-config variables to process.env to prevent credential leakage
+    const allowedServerKeys = [
+      'CODER_AGENT_PORT',
+      'CODER_AGENT_WORKSPACE_PATH',
+      'GCS_BUCKET_NAME',
+      'LOG_LEVEL',
+      'GOOGLE_APPLICATION_CREDENTIALS',
+      'GOOGLE_CLOUD_PROJECT',
+      'GEMINI_CLI_USE_COMPUTE_ADC',
+    ];
+    for (const key of allowedServerKeys) {
+      if (globalEnv[key] !== undefined) {
+        process.env[key] = globalEnv[key];
+      }
+    }
+
+    const settings = loadSettings(workspaceRoot, isTrusted ?? false);
+    const extensions = loadExtensions(workspaceRoot, isTrusted ?? false);
     const config = await loadConfig(
       settings,
       new SimpleExtensionLoader(extensions),
       'a2a-server',
+      isTrusted ?? false,
+      workspaceRoot,
     );
+
+    let git: GitService | undefined;
+    if (config.getCheckpointingEnabled()) {
+      git = new GitService(config.getTargetDir(), config.storage);
+      await git.initialize();
+    }
 
     // loadEnvironment() is called within getConfig now
     const bucketName = process.env['GCS_BUCKET_NAME'];
@@ -104,6 +264,8 @@ export async function createApp() {
 
     const agentExecutor = new CoderAgentExecutor(taskStoreForExecutor);
 
+    const context = { config, git, agentExecutor };
+
     const requestHandler = new DefaultRequestHandler(
       coderAgentCard,
       taskStoreForHandler,
@@ -115,16 +277,18 @@ export async function createApp() {
       requestStorage.run({ req }, next);
     });
 
-    const appBuilder = new A2AExpressApp(requestHandler);
+    const appBuilder = new A2AExpressApp(requestHandler, customUserBuilder);
     expressApp = appBuilder.setupRoutes(expressApp, '');
     expressApp.use(express.json());
 
     expressApp.post('/tasks', async (req, res) => {
       try {
         const taskId = uuidv4();
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
         const agentSettings = req.body.agentSettings as
           | AgentSettings
           | undefined;
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const contextId = req.body.contextId || uuidv4();
         const wrapper = await agentExecutor.createTask(
           taskId,
@@ -143,36 +307,8 @@ export async function createApp() {
       }
     });
 
-    expressApp.post('/executeCommand', async (req, res) => {
-      try {
-        const { command, args } = req.body;
-
-        if (typeof command !== 'string') {
-          return res.status(400).json({ error: 'Invalid "command" field.' });
-        }
-
-        if (args && !Array.isArray(args)) {
-          return res
-            .status(400)
-            .json({ error: '"args" field must be an array.' });
-        }
-
-        const commandToExecute = commandRegistry.get(command);
-
-        if (!commandToExecute) {
-          return res
-            .status(404)
-            .json({ error: `Command not found: ${command}` });
-        }
-
-        const result = await commandToExecute.execute(config, args ?? []);
-        return res.status(200).json(result);
-      } catch (e) {
-        logger.error('Error executing /executeCommand:', e);
-        const errorMessage =
-          e instanceof Error ? e.message : 'Unknown error executing command';
-        return res.status(500).json({ error: errorMessage });
-      }
+    expressApp.post('/executeCommand', (req, res) => {
+      void handleExecuteCommand(req, res, context);
     });
 
     expressApp.get('/listCommands', (req, res) => {
@@ -183,7 +319,7 @@ export async function createApp() {
         ): CommandResponse | undefined => {
           const commandName = command.name;
           if (visited.includes(commandName)) {
-            console.warn(
+            debugLogger.warn(
               `Command ${commandName} already inserted in the response, skipping`,
             );
             return undefined;
@@ -270,9 +406,9 @@ export async function createApp() {
 export async function main() {
   try {
     const expressApp = await createApp();
-    const port = process.env['CODER_AGENT_PORT'] || 0;
+    const port = Number(process.env['CODER_AGENT_PORT'] || 0);
 
-    const server = expressApp.listen(port, () => {
+    const server = expressApp.listen(port, 'localhost', () => {
       const address = server.address();
       let actualPort;
       if (process.env['CODER_AGENT_PORT']) {

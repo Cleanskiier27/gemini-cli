@@ -4,9 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as glob from 'glob';
 import * as path from 'node:path';
-import type { Config } from '@google/gemini-cli-core';
-import { GEMINI_DIR, Storage } from '@google/gemini-cli-core';
+import {
+  GEMINI_DIR,
+  Storage,
+  type Config,
+  homedir,
+} from '@google/gemini-cli-core';
 import mock from 'mock-fs';
 import { FileCommandLoader } from './FileCommandLoader.js';
 import { assert, vi } from 'vitest';
@@ -21,7 +26,7 @@ import {
   ShellProcessor,
 } from './prompt-processors/shellProcessor.js';
 import { DefaultArgumentProcessor } from './prompt-processors/argumentProcessor.js';
-import type { CommandContext } from '../ui/commands/types.js';
+import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import { AtFileProcessor } from './prompt-processors/atFileProcessor.js';
 
 const mockShellProcess = vi.hoisted(() => vi.fn());
@@ -70,11 +75,18 @@ vi.mock('@google/gemini-cli-core', async (importOriginal) => {
   };
 });
 
+vi.mock('glob', () => ({
+  glob: vi.fn(),
+}));
+
 describe('FileCommandLoader', () => {
   const signal: AbortSignal = new AbortController().signal;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const { glob: actualGlob } =
+      await vi.importActual<typeof import('glob')>('glob');
+    vi.mocked(glob.glob).mockImplementation(actualGlob);
     mockShellProcess.mockImplementation(
       (prompt: PromptPipelineContent, context: CommandContext) => {
         const userArgsRaw = context?.invocation?.args || '';
@@ -230,7 +242,7 @@ describe('FileCommandLoader', () => {
     const loader = new FileCommandLoader(mockConfig);
     const commands = await loader.loadCommands(signal);
     expect(commands).toHaveLength(1);
-    expect(commands[0]!.name).toBe('gcp:pipelines:run');
+    expect(commands[0].name).toBe('gcp:pipelines:run');
   });
 
   it('creates namespaces from nested directories', async () => {
@@ -306,6 +318,34 @@ describe('FileCommandLoader', () => {
     } else {
       assert.fail('Incorrect action type for project command');
     }
+  });
+
+  it('does not duplicate commands when project root is the home directory', async () => {
+    const homeDir = homedir();
+    const userCommandsDir = Storage.getUserCommandsDir();
+    mock({
+      [userCommandsDir]: {
+        'test.toml': 'prompt = "User prompt"',
+        'another.toml': 'prompt = "Another prompt"',
+      },
+    });
+
+    const mockConfig = {
+      getProjectRoot: vi.fn(() => homeDir),
+      getExtensions: vi.fn(() => []),
+      getFolderTrust: vi.fn(() => false),
+      isTrustedFolder: vi.fn(() => false),
+    } as unknown as Config;
+    const loader = new FileCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    // Should load each command only once (as user commands), not twice
+    expect(commands).toHaveLength(2);
+    const names = commands.map((c) => c.name);
+    expect(names).toContain('test');
+    expect(names).toContain('another');
+    // Verify they are loaded as user commands, not duplicated as workspace commands
+    expect(commands.every((c) => c.kind === CommandKind.USER_FILE)).toBe(true);
   });
 
   it('ignores files with TOML syntax errors', async () => {
@@ -1286,6 +1326,112 @@ describe('FileCommandLoader', () => {
       const commands = await loader.loadCommands(signal);
 
       expect(commands).toHaveLength(0);
+    });
+  });
+
+  describe('Aborted signal', () => {
+    it('does not log errors if the signal is aborted', async () => {
+      const controller = new AbortController();
+      const abortSignal = controller.signal;
+
+      const consoleErrorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+
+      const mockConfig = {
+        getProjectRoot: vi.fn(() => '/path/to/project'),
+        getExtensions: vi.fn(() => []),
+        getFolderTrust: vi.fn(() => false),
+        isTrustedFolder: vi.fn(() => false),
+      } as unknown as Config;
+
+      // Set up mock-fs so that the loader attempts to read a directory.
+      const userCommandsDir = Storage.getUserCommandsDir();
+      mock({
+        [userCommandsDir]: {
+          'test1.toml': 'prompt = "Prompt 1"',
+        },
+      });
+
+      const loader = new FileCommandLoader(mockConfig);
+
+      // Mock glob to throw an AbortError
+      const abortError = new DOMException('Aborted', 'AbortError');
+      vi.mocked(glob.glob).mockImplementation(async () => {
+        controller.abort(); // Ensure the signal is aborted when the service checks
+        throw abortError;
+      });
+
+      await loader.loadCommands(abortSignal);
+
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+
+      consoleErrorSpy.mockRestore();
+    });
+  });
+
+  describe('Sanitization', () => {
+    it('sanitizes command names from filenames containing control characters', async () => {
+      const userCommandsDir = Storage.getUserCommandsDir();
+      mock({
+        [userCommandsDir]: {
+          'test\twith\nnewlines.toml': 'prompt = "Test prompt"',
+        },
+      });
+
+      const loader = new FileCommandLoader(null);
+      const commands = await loader.loadCommands(signal);
+      expect(commands).toHaveLength(1);
+      // Non-alphanumeric characters (except - and .) become underscores
+      expect(commands[0].name).toBe('test_with_newlines');
+    });
+
+    it('truncates excessively long filenames', async () => {
+      const userCommandsDir = Storage.getUserCommandsDir();
+      const longName = 'a'.repeat(60) + '.toml';
+      mock({
+        [userCommandsDir]: {
+          [longName]: 'prompt = "Test prompt"',
+        },
+      });
+
+      const loader = new FileCommandLoader(null);
+      const commands = await loader.loadCommands(signal);
+      expect(commands).toHaveLength(1);
+      expect(commands[0].name.length).toBe(50);
+      expect(commands[0].name).toBe('a'.repeat(47) + '...');
+    });
+
+    it('sanitizes descriptions containing newlines and ANSI codes', async () => {
+      const userCommandsDir = Storage.getUserCommandsDir();
+      mock({
+        [userCommandsDir]: {
+          'test.toml':
+            'prompt = "Test"\ndescription = "Line 1\\nLine 2\\tTabbed\\r\\n\\u001B[31mRed text\\u001B[0m"',
+        },
+      });
+
+      const loader = new FileCommandLoader(null);
+      const commands = await loader.loadCommands(signal);
+      expect(commands).toHaveLength(1);
+      // Newlines and tabs become spaces, ANSI is stripped
+      expect(commands[0].description).toBe('Line 1 Line 2 Tabbed Red text');
+    });
+
+    it('truncates long descriptions', async () => {
+      const userCommandsDir = Storage.getUserCommandsDir();
+      const longDesc = 'd'.repeat(150);
+      mock({
+        [userCommandsDir]: {
+          'test.toml': `prompt = "Test"\ndescription = "${longDesc}"`,
+        },
+      });
+
+      const loader = new FileCommandLoader(null);
+      const commands = await loader.loadCommands(signal);
+      expect(commands).toHaveLength(1);
+      expect(commands[0].description.length).toBe(100);
+      expect(commands[0].description).toBe('d'.repeat(97) + '...');
     });
   });
 });

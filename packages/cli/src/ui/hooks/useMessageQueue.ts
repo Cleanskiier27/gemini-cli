@@ -11,6 +11,8 @@ export interface UseMessageQueueOptions {
   isConfigInitialized: boolean;
   streamingState: StreamingState;
   submitQuery: (query: string) => void;
+  isMcpReady: boolean;
+  isCompressing?: boolean;
 }
 
 export interface UseMessageQueueReturn {
@@ -18,7 +20,7 @@ export interface UseMessageQueueReturn {
   addMessage: (message: string) => void;
   clearQueue: () => void;
   getQueuedMessagesText: () => string;
-  popAllMessages: (onPop: (messages: string | undefined) => void) => void;
+  popAllMessages: () => string | undefined;
 }
 
 /**
@@ -30,6 +32,8 @@ export function useMessageQueue({
   isConfigInitialized,
   streamingState,
   submitQuery,
+  isMcpReady,
+  isCompressing = false,
 }: UseMessageQueueOptions): UseMessageQueueReturn {
   const [messageQueue, setMessageQueue] = useState<string[]>([]);
 
@@ -53,27 +57,22 @@ export function useMessageQueue({
   }, [messageQueue]);
 
   // Pop all messages from the queue and return them as a single string
-  const popAllMessages = useCallback(
-    (onPop: (messages: string | undefined) => void) => {
-      setMessageQueue((prev) => {
-        if (prev.length === 0) {
-          onPop(undefined);
-          return prev;
-        }
-        // Join all messages with double newlines, same as when they're sent
-        const allMessages = prev.join('\n\n');
-        onPop(allMessages);
-        return []; // Clear the entire queue
-      });
-    },
-    [],
-  );
+  const popAllMessages = useCallback(() => {
+    if (messageQueue.length === 0) {
+      return undefined;
+    }
+    const allMessages = messageQueue.join('\n\n');
+    setMessageQueue([]);
+    return allMessages;
+  }, [messageQueue]);
 
   // Process queued messages when streaming becomes idle
   useEffect(() => {
     if (
       isConfigInitialized &&
       streamingState === StreamingState.Idle &&
+      !isCompressing &&
+      isMcpReady &&
       messageQueue.length > 0
     ) {
       // Combine all messages with double newlines for clarity
@@ -82,7 +81,14 @@ export function useMessageQueue({
       setMessageQueue([]);
       submitQuery(combinedMessage);
     }
-  }, [isConfigInitialized, streamingState, messageQueue, submitQuery]);
+  }, [
+    isConfigInitialized,
+    streamingState,
+    isMcpReady,
+    messageQueue,
+    submitQuery,
+    isCompressing,
+  ]);
 
   return {
     messageQueue,

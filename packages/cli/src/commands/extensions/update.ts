@@ -12,13 +12,17 @@ import {
   updateExtension,
 } from '../../config/extensions/update.js';
 import { checkForExtensionUpdate } from '../../config/extensions/github.js';
-import { getErrorMessage } from '../../utils/errors.js';
 import { ExtensionUpdateState } from '../../ui/state/extensions.js';
-import { debugLogger } from '@google/gemini-cli-core';
+import {
+  coreEvents,
+  debugLogger,
+  getErrorMessage,
+} from '@google/gemini-cli-core';
 import { ExtensionManager } from '../../config/extension-manager.js';
 import { requestConsentNonInteractive } from '../../config/extensions/consent.js';
 import { loadSettings } from '../../config/settings.js';
 import { promptForSetting } from '../../config/extensions/extensionSettings.js';
+import { exitCli } from '../utils.js';
 
 interface UpdateArgs {
   name?: string;
@@ -45,7 +49,21 @@ export async function handleUpdate(args: UpdateArgs) {
         (extension) => extension.name === args.name,
       );
       if (!extension) {
-        debugLogger.log(`Extension "${args.name}" not found.`);
+        if (extensions.length === 0) {
+          coreEvents.emitFeedback(
+            'error',
+            `Extension "${args.name}" not found.\n\nNo extensions installed.`,
+          );
+          return;
+        }
+
+        const installedExtensions = extensions
+          .map((extension) => `${extension.name} (${extension.version})`)
+          .join('\n');
+        coreEvents.emitFeedback(
+          'error',
+          `Extension "${args.name}" not found.\n\nInstalled extensions:\n${installedExtensions}\n\nRun "gemini extensions list" for details.`,
+        );
         return;
       }
       if (!extension.installMetadata) {
@@ -62,7 +80,6 @@ export async function handleUpdate(args: UpdateArgs) {
         debugLogger.log(`Extension "${args.name}" is already up to date.`);
         return;
       }
-      // TODO(chrstnb): we should list extensions if the requested extension is not installed.
       const updatedExtensionInfo = (await updateExtension(
         extension,
         extensionManager,
@@ -141,8 +158,11 @@ export const updateCommand: CommandModule = {
       }),
   handler: async (argv) => {
     await handleUpdate({
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       name: argv['name'] as string | undefined,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       all: argv['all'] as boolean | undefined,
     });
+    await exitCli();
   },
 };

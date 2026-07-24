@@ -9,8 +9,7 @@ import path from 'node:path';
 import toml from '@iarna/toml';
 import { glob } from 'glob';
 import { z } from 'zod';
-import type { Config } from '@google/gemini-cli-core';
-import { Storage } from '@google/gemini-cli-core';
+import { Storage, coreEvents, type Config } from '@google/gemini-cli-core';
 import type { ICommandLoader } from './types.js';
 import type {
   CommandContext,
@@ -33,11 +32,20 @@ import {
   ShellProcessor,
 } from './prompt-processors/shellProcessor.js';
 import { AtFileProcessor } from './prompt-processors/atFileProcessor.js';
+import { sanitizeForDisplay } from '../ui/utils/textUtils.js';
 
-interface CommandDirectory {
+export interface CommandDirectory {
   path: string;
+  kind: CommandKind;
   extensionName?: string;
   extensionId?: string;
+}
+
+export interface CommandFileGroup {
+  displayName: string;
+  path: string;
+  files: string[];
+  error?: string;
 }
 
 /**
@@ -85,6 +93,10 @@ export class FileCommandLoader implements ICommandLoader {
    * @returns A promise that resolves to an array of all loaded SlashCommands.
    */
   async loadCommands(signal: AbortSignal): Promise<SlashCommand[]> {
+    if (this.folderTrustEnabled && !this.isTrustedFolder) {
+      return [];
+    }
+
     const allCommands: SlashCommand[] = [];
     const globOptions = {
       nodir: true,
@@ -102,14 +114,11 @@ export class FileCommandLoader implements ICommandLoader {
           cwd: dirInfo.path,
         });
 
-        if (this.folderTrustEnabled && !this.isTrustedFolder) {
-          return [];
-        }
-
         const commandPromises = files.map((file) =>
           this.parseAndAdaptFile(
             path.join(dirInfo.path, file),
             dirInfo.path,
+            dirInfo.kind,
             dirInfo.extensionName,
             dirInfo.extensionId,
           ),
@@ -122,8 +131,13 @@ export class FileCommandLoader implements ICommandLoader {
         // Add all commands without deduplication
         allCommands.push(...commands);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          console.error(
+        if (
+          !signal.aborted &&
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+          (error as { code?: string })?.code !== 'ENOENT'
+        ) {
+          coreEvents.emitFeedback(
+            'error',
             `[FileCommandLoader] Error loading commands from ${dirInfo.path}:`,
             error,
           );
@@ -132,6 +146,59 @@ export class FileCommandLoader implements ICommandLoader {
     }
 
     return allCommands;
+  }
+
+  /**
+   * Lists available .toml command files from user, project, and extension directories.
+   */
+  async listAvailableFiles(): Promise<CommandFileGroup[]> {
+    const directories = this.getCommandDirectories();
+    const groups: CommandFileGroup[] = [];
+
+    for (const dir of directories) {
+      const displayName = this.getDisplayName(dir);
+
+      try {
+        const files = await glob('**/*.toml', { cwd: dir.path });
+        if (files.length > 0) {
+          groups.push({
+            displayName,
+            path: dir.path,
+            files: [...files].sort(),
+          });
+        }
+      } catch (e) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        if ((e as { code?: string }).code === 'ENOENT') {
+          continue;
+        }
+
+        groups.push({
+          displayName,
+          path: dir.path,
+          files: [],
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    return groups;
+  }
+
+  /**
+   * Returns a human-readable display name for the command directory source.
+   */
+  private getDisplayName(dir: CommandDirectory): string {
+    switch (dir.kind) {
+      case CommandKind.USER_FILE:
+        return 'User';
+      case CommandKind.WORKSPACE_FILE:
+        return 'Project';
+      case CommandKind.EXTENSION_FILE:
+        return `Extension: ${dir.extensionName || 'Unknown'}`;
+      default:
+        return 'Custom';
+    }
   }
 
   /**
@@ -145,10 +212,20 @@ export class FileCommandLoader implements ICommandLoader {
     const storage = this.config?.storage ?? new Storage(this.projectRoot);
 
     // 1. User commands
-    dirs.push({ path: Storage.getUserCommandsDir() });
+    const userCommandsDir = Storage.getUserCommandsDir();
+    dirs.push({
+      path: userCommandsDir,
+      kind: CommandKind.USER_FILE,
+    });
 
-    // 2. Project commands (override user commands)
-    dirs.push({ path: storage.getProjectCommandsDir() });
+    // 2. Project commands (skip if same directory as user commands, e.g. when
+    //    cwd is the user's home directory, to avoid false conflict warnings)
+    if (!storage.isWorkspaceHomeDir()) {
+      dirs.push({
+        path: storage.getProjectCommandsDir(),
+        kind: CommandKind.WORKSPACE_FILE,
+      });
+    }
 
     // 3. Extension commands (processed last to detect all conflicts)
     if (this.config) {
@@ -159,6 +236,7 @@ export class FileCommandLoader implements ICommandLoader {
 
       const extensionCommandDirs = activeExtensions.map((ext) => ({
         path: path.join(ext.path, 'commands'),
+        kind: CommandKind.EXTENSION_FILE,
         extensionName: ext.name,
         extensionId: ext.id,
       }));
@@ -173,12 +251,14 @@ export class FileCommandLoader implements ICommandLoader {
    * Parses a single .toml file and transforms it into a SlashCommand object.
    * @param filePath The absolute path to the .toml file.
    * @param baseDir The root command directory for name calculation.
+   * @param kind The CommandKind.
    * @param extensionName Optional extension name to prefix commands with.
    * @returns A promise resolving to a SlashCommand, or null if the file is invalid.
    */
   private async parseAndAdaptFile(
     filePath: string,
     baseDir: string,
+    kind: CommandKind,
     extensionName?: string,
     extensionId?: string,
   ): Promise<SlashCommand | null> {
@@ -186,7 +266,8 @@ export class FileCommandLoader implements ICommandLoader {
     try {
       fileContent = await fs.readFile(filePath, 'utf-8');
     } catch (error: unknown) {
-      console.error(
+      coreEvents.emitFeedback(
+        'error',
         `[FileCommandLoader] Failed to read file ${filePath}:`,
         error instanceof Error ? error.message : String(error),
       );
@@ -197,7 +278,8 @@ export class FileCommandLoader implements ICommandLoader {
     try {
       parsed = toml.parse(fileContent);
     } catch (error: unknown) {
-      console.error(
+      coreEvents.emitFeedback(
+        'error',
         `[FileCommandLoader] Failed to parse TOML file ${filePath}:`,
         error instanceof Error ? error.message : String(error),
       );
@@ -207,7 +289,8 @@ export class FileCommandLoader implements ICommandLoader {
     const validationResult = TomlCommandDefSchema.safeParse(parsed);
 
     if (!validationResult.success) {
-      console.error(
+      coreEvents.emitFeedback(
+        'error',
         `[FileCommandLoader] Skipping invalid command file: ${filePath}. Validation errors:`,
         validationResult.error.flatten(),
       );
@@ -223,15 +306,25 @@ export class FileCommandLoader implements ICommandLoader {
     );
     const baseCommandName = relativePath
       .split(path.sep)
-      // Sanitize each path segment to prevent ambiguity. Since ':' is our
-      // namespace separator, we replace any literal colons in filenames
-      // with underscores to avoid naming conflicts.
-      .map((segment) => segment.replaceAll(':', '_'))
+      // Sanitize each path segment to prevent ambiguity, replacing non-allowlisted characters with underscores.
+      // Since ':' is our namespace separator, this ensures that colons do not cause naming conflicts.
+      .map((segment) => {
+        let sanitized = segment.replace(/[^a-zA-Z0-9_\-.]/g, '_');
+
+        // Truncate excessively long segments to prevent UI overflow
+        if (sanitized.length > 50) {
+          sanitized = sanitized.substring(0, 47) + '...';
+        }
+        return sanitized;
+      })
       .join(':');
 
     // Add extension name tag for extension commands
     const defaultDescription = `Custom command from ${path.basename(filePath)}`;
     let description = validDef.description || defaultDescription;
+
+    description = sanitizeForDisplay(description, 100);
+
     if (extensionName) {
       description = `[${extensionName}] ${description}`;
     }
@@ -267,7 +360,7 @@ export class FileCommandLoader implements ICommandLoader {
     return {
       name: baseCommandName,
       description,
-      kind: CommandKind.FILE,
+      kind,
       extensionName,
       extensionId,
       action: async (
@@ -275,7 +368,8 @@ export class FileCommandLoader implements ICommandLoader {
         _args: string,
       ): Promise<SlashCommandActionReturn> => {
         if (!context.invocation) {
-          console.error(
+          coreEvents.emitFeedback(
+            'error',
             `[FileCommandLoader] Critical error: Command '${baseCommandName}' was executed without invocation context.`,
           );
           return {

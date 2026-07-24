@@ -55,16 +55,18 @@ describe('<ExtensionsList />', () => {
     } as never);
   };
 
-  it('should render "No extensions installed." if there are no extensions', () => {
+  it('should render "No extensions installed." if there are no extensions', async () => {
     mockUIState(new Map());
-    const { lastFrame, unmount } = render(<ExtensionsList extensions={[]} />);
+    const { lastFrame, unmount } = await render(
+      <ExtensionsList extensions={[]} />,
+    );
     expect(lastFrame()).toContain('No extensions installed.');
     unmount();
   });
 
-  it('should render a list of extensions with their version and status', () => {
+  it('should render a list of extensions with their version and status', async () => {
     mockUIState(new Map());
-    const { lastFrame, unmount } = render(
+    const { lastFrame, unmount } = await render(
       <ExtensionsList extensions={mockExtensions} />,
     );
     const output = lastFrame();
@@ -74,16 +76,16 @@ describe('<ExtensionsList />', () => {
     unmount();
   });
 
-  it('should display "unknown state" if an extension has no update state', () => {
+  it('should display "unknown state" if an extension has no update state', async () => {
     mockUIState(new Map());
-    const { lastFrame, unmount } = render(
+    const { lastFrame, unmount } = await render(
       <ExtensionsList extensions={[mockExtensions[0]]} />,
     );
     expect(lastFrame()).toContain('(unknown state)');
     unmount();
   });
 
-  const stateTestCases = [
+  it.each([
     {
       state: ExtensionUpdateState.CHECKING_FOR_UPDATES,
       expectedText: '(checking for updates)',
@@ -112,17 +114,56 @@ describe('<ExtensionsList />', () => {
       state: ExtensionUpdateState.UP_TO_DATE,
       expectedText: '(up to date)',
     },
-  ];
-
-  for (const { state, expectedText } of stateTestCases) {
-    it(`should correctly display the state: ${state}`, () => {
+  ])(
+    'should correctly display the state: $state',
+    async ({ state, expectedText }) => {
       const updateState = new Map([[mockExtensions[0].name, state]]);
       mockUIState(updateState);
-      const { lastFrame, unmount } = render(
+      const { lastFrame, unmount } = await render(
         <ExtensionsList extensions={[mockExtensions[0]]} />,
       );
       expect(lastFrame()).toContain(expectedText);
       unmount();
-    });
-  }
+    },
+  );
+
+  it('should render resolved settings for an extension', async () => {
+    mockUIState(new Map());
+    const extensionWithSettings = {
+      ...mockExtensions[0],
+      resolvedSettings: [
+        {
+          name: 'sensitiveApiKey',
+          value: '***',
+          envVar: 'API_KEY',
+          sensitive: true,
+        },
+        {
+          name: 'maxTokens',
+          value: '1000',
+          envVar: 'MAX_TOKENS',
+          sensitive: false,
+          scope: 'user' as const,
+          source: '/path/to/.env',
+        },
+        {
+          name: 'model',
+          value: 'gemini-pro',
+          envVar: 'MODEL',
+          sensitive: false,
+          scope: 'workspace' as const,
+          source: 'Keychain',
+        },
+      ],
+    };
+    const { lastFrame, unmount } = await render(
+      <ExtensionsList extensions={[extensionWithSettings]} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('settings:');
+    expect(output).toContain('- sensitiveApiKey: ***');
+    expect(output).toContain('- maxTokens: 1000 (User - /path/to/.env)');
+    expect(output).toContain('- model: gemini-pro (Workspace - Keychain)');
+    unmount();
+  });
 });

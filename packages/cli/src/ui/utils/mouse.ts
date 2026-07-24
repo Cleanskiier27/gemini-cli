@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import process from 'node:process';
+import { enableMouseEvents, disableMouseEvents } from '@google/gemini-cli-core';
 import {
   SGR_MOUSE_REGEX,
   X11_MOUSE_REGEX,
@@ -24,7 +24,11 @@ export type MouseEventName =
   | 'scroll-down'
   | 'scroll-left'
   | 'scroll-right'
-  | 'move';
+  | 'move'
+  | 'double-click';
+
+export const DOUBLE_CLICK_THRESHOLD_MS = 400;
+export const DOUBLE_CLICK_DISTANCE_TOLERANCE = 2;
 
 export interface MouseEvent {
   name: MouseEventName;
@@ -33,9 +37,10 @@ export interface MouseEvent {
   shift: boolean;
   meta: boolean;
   ctrl: boolean;
+  button: 'left' | 'middle' | 'right' | 'none';
 }
 
-export type MouseHandler = (event: MouseEvent) => void;
+export type MouseHandler = (event: MouseEvent) => void | boolean;
 
 export function getMouseEventName(
   buttonCode: number,
@@ -71,6 +76,20 @@ export function getMouseEventName(
   }
 }
 
+function getButtonFromCode(code: number): MouseEvent['button'] {
+  const button = code & 3;
+  switch (button) {
+    case 0:
+      return 'left';
+    case 1:
+      return 'middle';
+    case 2:
+      return 'right';
+    default:
+      return 'none';
+  }
+}
+
 export function parseSGRMouseEvent(
   buffer: string,
 ): { event: MouseEvent; length: number } | null {
@@ -98,6 +117,7 @@ export function parseSGRMouseEvent(
           shift,
           col,
           row,
+          button: getButtonFromCode(buttonCode),
         },
         length: match[0].length,
       };
@@ -165,8 +185,21 @@ export function parseX11MouseEvent(
   }
 
   if (name) {
+    let button = getButtonFromCode(b);
+    if (name === 'left-release' && button === 'none') {
+      button = 'left';
+    }
+
     return {
-      event: { name, ctrl, meta, shift, col, row },
+      event: {
+        name,
+        ctrl,
+        meta,
+        shift,
+        col,
+        row,
+        button,
+      },
       length: match[0].length,
     };
   }
@@ -201,14 +234,4 @@ export function isIncompleteMouseSequence(buffer: string): boolean {
   return true;
 }
 
-export function enableMouseEvents() {
-  // Enable mouse tracking with SGR format
-  // ?1002h = button event tracking (clicks + drags + scroll wheel)
-  // ?1006h = SGR extended mouse mode (better coordinate handling)
-  process.stdout.write('\u001b[?1002h\u001b[?1006h');
-}
-
-export function disableMouseEvents() {
-  // Disable mouse tracking with SGR format
-  process.stdout.write('\u001b[?1006l\u001b[?1002l');
-}
+export { enableMouseEvents, disableMouseEvents };

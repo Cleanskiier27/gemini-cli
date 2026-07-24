@@ -5,11 +5,16 @@
  */
 
 import type React from 'react';
+import { useRef, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { TextInput } from '../components/shared/TextInput.js';
 import { useTextBuffer } from '../components/shared/text-buffer.js';
 import { useUIState } from '../contexts/UIStateContext.js';
+import { clearApiKey, debugLogger } from '@google/gemini-cli-core';
+import { useKeypress } from '../hooks/useKeypress.js';
+import { Command } from '../key/keyMatchers.js';
+import { useKeyMatchers } from '../hooks/useKeyMatchers.js';
 
 interface ApiAuthDialogProps {
   onSubmit: (apiKey: string) => void;
@@ -24,19 +29,30 @@ export function ApiAuthDialog({
   error,
   defaultValue = '',
 }: ApiAuthDialogProps): React.JSX.Element {
-  const { mainAreaWidth } = useUIState();
-  const viewportWidth = mainAreaWidth - 8;
+  const keyMatchers = useKeyMatchers();
+  const { terminalWidth } = useUIState();
+  const viewportWidth = terminalWidth - 8;
+
+  const pendingPromise = useRef<{ cancel: () => void } | null>(null);
+
+  useEffect(
+    () => () => {
+      pendingPromise.current?.cancel();
+    },
+    [],
+  );
+
+  const initialApiKey = defaultValue;
 
   const buffer = useTextBuffer({
-    initialText: defaultValue || '',
-    initialCursorOffset: defaultValue?.length || 0,
+    initialText: initialApiKey || '',
+    initialCursorOffset: initialApiKey?.length || 0,
     viewport: {
       width: viewportWidth,
       height: 4,
     },
-    isValidPath: () => false, // No path validation needed for API key
     inputFilter: (text) =>
-      text.replace(/[^a-zA-Z0-9_-]/g, '').replace(/[\r\n]/g, ''),
+      text.replace(/[^a-zA-Z0-9_.-]/g, '').replace(/[\r\n]/g, ''),
     singleLine: true,
   });
 
@@ -44,10 +60,47 @@ export function ApiAuthDialog({
     onSubmit(value);
   };
 
+  const handleClear = () => {
+    pendingPromise.current?.cancel();
+
+    let isCancelled = false;
+    const wrappedPromise = new Promise<void>((resolve, reject) => {
+      clearApiKey().then(
+        () => !isCancelled && resolve(),
+        (error) => !isCancelled && reject(error),
+      );
+    });
+
+    pendingPromise.current = {
+      cancel: () => {
+        isCancelled = true;
+      },
+    };
+
+    return wrappedPromise
+      .then(() => {
+        buffer.setText('');
+      })
+      .catch((err) => {
+        debugLogger.debug('Failed to clear API key:', err);
+      });
+  };
+
+  useKeypress(
+    (key) => {
+      if (keyMatchers[Command.CLEAR_INPUT](key)) {
+        void handleClear();
+        return true;
+      }
+      return false;
+    },
+    { isActive: true },
+  );
+
   return (
     <Box
       borderStyle="round"
-      borderColor={theme.border.focused}
+      borderColor={theme.ui.focus}
       flexDirection="column"
       padding={1}
       width="100%"
@@ -89,7 +142,7 @@ export function ApiAuthDialog({
       )}
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
-          (Press Enter to submit, Esc to cancel)
+          (Press Enter to submit, Esc to cancel, Ctrl+C to clear stored key)
         </Text>
       </Box>
     </Box>

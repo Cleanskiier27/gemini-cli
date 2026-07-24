@@ -4,14 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Mock } from 'vitest';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import type { Content } from '@google/genai';
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 import type { ContentGenerator } from '../core/contentGenerator.js';
 import type { Config } from '../config/config.js';
-import type { NextSpeakerResponse } from './nextSpeakerChecker.js';
-import { checkNextSpeaker } from './nextSpeakerChecker.js';
+import {
+  checkNextSpeaker,
+  type NextSpeakerResponse,
+} from './nextSpeakerChecker.js';
 import { GeminiChat } from '../core/geminiChat.js';
 
 // Mock fs module to prevent actual file system operations during tests
@@ -32,6 +41,10 @@ vi.mock('node:fs', () => {
       });
     }),
     existsSync: vi.fn((path: string) => mockFileSystem.has(path)),
+    createWriteStream: vi.fn(() => ({
+      write: vi.fn(),
+      on: vi.fn(),
+    })),
   };
 
   return {
@@ -58,6 +71,10 @@ describe('checkNextSpeaker', () => {
       generateContentConfig: {},
     };
     mockConfig = {
+      get config() {
+        return this;
+      },
+      promptId: 'test-session-id',
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getModel: () => 'test-model',
@@ -82,7 +99,8 @@ describe('checkNextSpeaker', () => {
     // GeminiChat will receive the mocked instances via the mocked GoogleGenAI constructor
     chatInstance = new GeminiChat(
       mockConfig,
-      {},
+      '', // empty system instruction
+      [], // no tools
       [], // initial history
     );
 

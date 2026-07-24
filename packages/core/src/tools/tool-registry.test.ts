@@ -5,20 +5,32 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type { Mocked, MockInstance } from 'vitest';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ConfigParameters } from '../config/config.js';
-import { Config } from '../config/config.js';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mocked,
+  type MockInstance,
+} from 'vitest';
+import { Config, type ConfigParameters } from '../config/config.js';
 import { ApprovalMode } from '../policy/types.js';
 
+import { ToolRegistry, DiscoveredTool } from './tool-registry.js';
 import {
-  ToolRegistry,
-  DiscoveredTool,
   DISCOVERED_TOOL_PREFIX,
-} from './tool-registry.js';
+  UPDATE_TOPIC_TOOL_NAME,
+  ENTER_PLAN_MODE_TOOL_NAME,
+  EXIT_PLAN_MODE_TOOL_NAME,
+} from './tool-names.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
-import type { FunctionDeclaration, CallableTool } from '@google/genai';
-import { mcpToTool } from '@google/genai';
+import {
+  mcpToTool,
+  type FunctionDeclaration,
+  type CallableTool,
+} from '@google/genai';
 import { spawn } from 'node:child_process';
 
 import fs from 'node:fs';
@@ -84,6 +96,31 @@ vi.mock('@google/genai', async () => {
   };
 });
 
+// Mock tool-names to provide a consistent alias for testing
+vi.mock('./tool-names.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./tool-names.js')>();
+  const mockedAliases: Record<string, string> = {
+    ...actual.TOOL_LEGACY_ALIASES,
+    legacy_test_tool: 'current_test_tool',
+  };
+  return {
+    ...actual,
+    TOOL_LEGACY_ALIASES: mockedAliases,
+    // Override getToolAliases to use the mocked aliases map
+    getToolAliases: (name: string): string[] => {
+      const aliases = new Set<string>([name]);
+      const canonicalName = mockedAliases[name] ?? name;
+      aliases.add(canonicalName);
+      for (const [legacyName, currentName] of Object.entries(mockedAliases)) {
+        if (currentName === canonicalName) {
+          aliases.add(legacyName);
+        }
+      }
+      return Array.from(aliases);
+    },
+  };
+});
+
 // Helper to create a mock CallableTool for specific test needs
 const createMockCallableTool = (
   toolDeclarations: FunctionDeclaration[],
@@ -91,6 +128,86 @@ const createMockCallableTool = (
   tool: vi.fn().mockResolvedValue({ functionDeclarations: toolDeclarations }),
   callTool: vi.fn(),
 });
+
+// Helper to create a DiscoveredMCPTool
+const mockMessageBusForHelper = {
+  publish: vi.fn(),
+  subscribe: vi.fn(),
+  unsubscribe: vi.fn(),
+} as unknown as MessageBus;
+
+const createMCPTool = (
+  serverName: string,
+  toolName: string,
+  description: string,
+  mockCallable: CallableTool = {} as CallableTool,
+) =>
+  new DiscoveredMCPTool(
+    mockCallable,
+    serverName,
+    toolName,
+    description,
+    {},
+    mockMessageBusForHelper,
+  );
+
+// Helper to create a mock spawn process for tool discovery
+const createDiscoveryProcess = (toolDeclarations: FunctionDeclaration[]) => {
+  const mockProcess = {
+    stdout: { on: vi.fn(), removeListener: vi.fn() },
+    stderr: { on: vi.fn(), removeListener: vi.fn() },
+    on: vi.fn(),
+  };
+
+  mockProcess.stdout.on.mockImplementation((event, callback) => {
+    if (event === 'data') {
+      callback(
+        Buffer.from(
+          JSON.stringify([{ functionDeclarations: toolDeclarations }]),
+        ),
+      );
+    }
+    return mockProcess as any;
+  });
+
+  mockProcess.on.mockImplementation((event, callback) => {
+    if (event === 'close') {
+      callback(0);
+    }
+    return mockProcess as any;
+  });
+
+  return mockProcess;
+};
+
+// Helper to create a mock spawn process for tool execution
+const createExecutionProcess = (exitCode: number, stderrMessage?: string) => {
+  const mockProcess = {
+    stdout: { on: vi.fn(), removeListener: vi.fn() },
+    stderr: { on: vi.fn(), removeListener: vi.fn() },
+    stdin: { write: vi.fn(), end: vi.fn() },
+    on: vi.fn(),
+    connected: true,
+    disconnect: vi.fn(),
+    removeListener: vi.fn(),
+  };
+
+  if (stderrMessage) {
+    mockProcess.stderr.on.mockImplementation((event, callback) => {
+      if (event === 'data') {
+        callback(Buffer.from(stderrMessage));
+      }
+    });
+  }
+
+  mockProcess.on.mockImplementation((event, callback) => {
+    if (event === 'close') {
+      callback(exitCode);
+    }
+  });
+
+  return mockProcess;
+};
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -108,6 +225,11 @@ const baseConfigParams: ConfigParameters = {
 describe('ToolRegistry', () => {
   let config: Config;
   let toolRegistry: ToolRegistry;
+  const mockMessageBus = {
+    publish: vi.fn(),
+    subscribe: vi.fn(),
+    unsubscribe: vi.fn(),
+  } as unknown as MessageBus;
   let mockConfigGetToolDiscoveryCommand: ReturnType<typeof vi.spyOn>;
   let mockConfigGetExcludedTools: MockInstance<
     typeof Config.prototype.getExcludeTools
@@ -119,7 +241,7 @@ describe('ToolRegistry', () => {
       isDirectory: () => true,
     } as fs.Stats);
     config = new Config(baseConfigParams);
-    toolRegistry = new ToolRegistry(config);
+    toolRegistry = new ToolRegistry(config, mockMessageBus);
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'debug').mockImplementation(() => {});
@@ -154,6 +276,37 @@ describe('ToolRegistry', () => {
       toolRegistry.registerTool(tool);
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
     });
+
+    it('should pass modelId to getSchema when getting function declarations', () => {
+      const tool = new MockTool({ name: 'mock-tool' });
+      const getSchemaSpy = vi.spyOn(tool, 'getSchema');
+      toolRegistry.registerTool(tool);
+
+      const modelId = 'test-model-id';
+      toolRegistry.getFunctionDeclarations(modelId);
+
+      expect(getSchemaSpy).toHaveBeenCalledWith(modelId);
+    });
+  });
+
+  describe('removeMcpToolsByServer', () => {
+    it('should remove all tools from a specific server', () => {
+      const serverName = 'test-server';
+      const mcpTool1 = createMCPTool(serverName, 'tool1', 'desc1');
+      const mcpTool2 = createMCPTool(serverName, 'tool2', 'desc2');
+      const otherTool = createMCPTool('other-server', 'tool3', 'desc3');
+
+      toolRegistry.registerTool(mcpTool1);
+      toolRegistry.registerTool(mcpTool2);
+      toolRegistry.registerTool(otherTool);
+
+      expect(toolRegistry.getToolsByServer(serverName)).toHaveLength(2);
+
+      toolRegistry.removeMcpToolsByServer(serverName);
+
+      expect(toolRegistry.getToolsByServer(serverName)).toHaveLength(0);
+      expect(toolRegistry.getToolsByServer('other-server')).toHaveLength(1);
+    });
   });
 
   describe('excluded tools', () => {
@@ -165,13 +318,10 @@ describe('ToolRegistry', () => {
       name: 'excluded-tool-class',
       displayName: 'Excluded Tool Class',
     });
-    const mockCallable = {} as CallableTool;
-    const mcpTool = new DiscoveredMCPTool(
-      mockCallable,
+    const mcpTool = createMCPTool(
       'mcp-server',
       'excluded-mcp-tool',
       'description',
-      {},
     );
     const allowedTool = new MockTool({
       name: 'allowed-tool',
@@ -185,19 +335,39 @@ describe('ToolRegistry', () => {
         excludedTools: ['tool-a'],
       },
       {
-        name: 'should match simple MCP tool names, when qualified or unqualified',
-        tools: [mcpTool, mcpTool.asFullyQualifiedTool()],
+        name: 'should match simple MCP tool names',
+        tools: [mcpTool],
         excludedTools: [mcpTool.name],
       },
       {
-        name: 'should match qualified MCP tool names when qualified or unqualified',
-        tools: [mcpTool, mcpTool.asFullyQualifiedTool()],
-        excludedTools: [`${mcpTool.getFullyQualifiedPrefix()}${mcpTool.name}`],
+        name: 'should match qualified MCP tool names',
+        tools: [mcpTool],
+        excludedTools: [mcpTool.name],
       },
       {
         name: 'should match class names',
         tools: [excludedTool],
         excludedTools: ['ExcludedMockTool'],
+      },
+      {
+        name: 'should exclude a tool when its legacy alias is in excludeTools',
+        tools: [
+          new MockTool({
+            name: 'current_test_tool',
+            displayName: 'Current Test Tool',
+          }),
+        ],
+        excludedTools: ['legacy_test_tool'],
+      },
+      {
+        name: 'should exclude a tool when its current name is in excludeTools and tool is registered under current name',
+        tools: [
+          new MockTool({
+            name: 'current_test_tool',
+            displayName: 'Current Test Tool',
+          }),
+        ],
+        excludedTools: ['current_test_tool'],
       },
     ])('$name', ({ tools, excludedTools }) => {
       toolRegistry.registerTool(allowedTool);
@@ -245,20 +415,36 @@ describe('ToolRegistry', () => {
   });
 
   describe('getAllToolNames', () => {
-    it('should return all registered tool names', () => {
+    it('should return all registered tool names with qualified names for MCP tools', () => {
       // Register tools with displayNames in non-alphabetical order
       const toolC = new MockTool({ name: 'c-tool', displayName: 'Tool C' });
       const toolA = new MockTool({ name: 'a-tool', displayName: 'Tool A' });
-      const toolB = new MockTool({ name: 'b-tool', displayName: 'Tool B' });
+      const mcpTool = createMCPTool('my-server', 'my-tool', 'desc');
 
       toolRegistry.registerTool(toolC);
       toolRegistry.registerTool(toolA);
-      toolRegistry.registerTool(toolB);
+      toolRegistry.registerTool(mcpTool);
 
       const toolNames = toolRegistry.getAllToolNames();
 
-      // Assert that the returned array contains all tool names
-      expect(toolNames).toEqual(['c-tool', 'a-tool', 'b-tool']);
+      // Assert that the returned array contains all tool names, with MCP qualified
+      expect(toolNames).toContain('c-tool');
+      expect(toolNames).toContain('a-tool');
+      expect(toolNames).toContain('mcp_my-server_my-tool');
+      expect(toolNames).toHaveLength(3);
+    });
+
+    it('should deduplicate tool names', () => {
+      const serverName = 'my-server';
+      const toolName = 'my-tool';
+      const mcpTool = createMCPTool(serverName, toolName, 'desc');
+
+      // Register same MCP tool twice
+      toolRegistry.registerTool(mcpTool);
+      toolRegistry.registerTool(mcpTool);
+
+      const toolNames = toolRegistry.getAllToolNames();
+      expect(toolNames).toEqual([`mcp_${serverName}_${toolName}`]);
     });
   });
 
@@ -271,36 +457,10 @@ describe('ToolRegistry', () => {
     it('should return only tools matching the server name, sorted by name', async () => {
       const server1Name = 'mcp-server-uno';
       const server2Name = 'mcp-server-dos';
-      const mockCallable = {} as CallableTool;
-      const mcpTool1_c = new DiscoveredMCPTool(
-        mockCallable,
-        server1Name,
-        'zebra-tool',
-        'd1',
-        {},
-      );
-      const mcpTool1_a = new DiscoveredMCPTool(
-        mockCallable,
-        server1Name,
-        'apple-tool',
-        'd2',
-        {},
-      );
-      const mcpTool1_b = new DiscoveredMCPTool(
-        mockCallable,
-        server1Name,
-        'banana-tool',
-        'd3',
-        {},
-      );
-
-      const mcpTool2 = new DiscoveredMCPTool(
-        mockCallable,
-        server2Name,
-        'tool-on-server2',
-        'd4',
-        {},
-      );
+      const mcpTool1_c = createMCPTool(server1Name, 'zebra-tool', 'd1');
+      const mcpTool1_a = createMCPTool(server1Name, 'apple-tool', 'd2');
+      const mcpTool1_b = createMCPTool(server1Name, 'banana-tool', 'd3');
+      const mcpTool2 = createMCPTool(server2Name, 'tool-on-server2', 'd4');
       const nonMcpTool = new MockTool({ name: 'regular-tool' });
 
       toolRegistry.registerTool(mcpTool1_c);
@@ -314,7 +474,11 @@ describe('ToolRegistry', () => {
 
       // Assert that the array has the correct tools and is sorted by name
       expect(toolsFromServer1).toHaveLength(3);
-      expect(toolNames).toEqual(['apple-tool', 'banana-tool', 'zebra-tool']);
+      expect(toolNames).toEqual([
+        'mcp_mcp-server-uno_apple-tool',
+        'mcp_mcp-server-uno_banana-tool',
+        'mcp_mcp-server-uno_zebra-tool',
+      ]);
 
       // Assert that all returned tools are indeed from the correct server
       for (const tool of toolsFromServer1) {
@@ -338,22 +502,10 @@ describe('ToolRegistry', () => {
         DISCOVERED_TOOL_PREFIX + 'discovered-1',
         'desc',
         {},
+        mockMessageBus,
       );
-      const mockCallable = {} as CallableTool;
-      const mcpZebra = new DiscoveredMCPTool(
-        mockCallable,
-        'zebra-server',
-        'mcp-zebra',
-        'desc',
-        {},
-      );
-      const mcpApple = new DiscoveredMCPTool(
-        mockCallable,
-        'apple-server',
-        'mcp-apple',
-        'desc',
-        {},
-      );
+      const mcpZebra = createMCPTool('zebra-server', 'mcp-zebra', 'desc');
+      const mcpApple = createMCPTool('apple-server', 'mcp-apple', 'desc');
 
       // Register in mixed order
       toolRegistry.registerTool(mcpZebra);
@@ -368,8 +520,8 @@ describe('ToolRegistry', () => {
         'builtin-1',
         'builtin-2',
         DISCOVERED_TOOL_PREFIX + 'discovered-1',
-        'mcp-apple',
-        'mcp-zebra',
+        'mcp_apple-server_mcp-apple',
+        'mcp_zebra-server_mcp-zebra',
       ]);
     });
   });
@@ -394,34 +546,9 @@ describe('ToolRegistry', () => {
       };
 
       const mockSpawn = vi.mocked(spawn);
-      const mockChildProcess = {
-        stdout: { on: vi.fn() },
-        stderr: { on: vi.fn() },
-        on: vi.fn(),
-      };
-      mockSpawn.mockReturnValue(mockChildProcess as any);
-
-      // Simulate stdout data
-      mockChildProcess.stdout.on.mockImplementation((event, callback) => {
-        if (event === 'data') {
-          callback(
-            Buffer.from(
-              JSON.stringify([
-                { function_declarations: [unsanitizedToolDeclaration] },
-              ]),
-            ),
-          );
-        }
-        return mockChildProcess as any;
-      });
-
-      // Simulate process close
-      mockChildProcess.on.mockImplementation((event, callback) => {
-        if (event === 'close') {
-          callback(0);
-        }
-        return mockChildProcess as any;
-      });
+      mockSpawn.mockReturnValue(
+        createDiscoveryProcess([unsanitizedToolDeclaration]) as any,
+      );
 
       await toolRegistry.discoverAllTools();
 
@@ -438,6 +565,11 @@ describe('ToolRegistry', () => {
           some_string: {
             type: 'string',
             format: 'uuid',
+          },
+          wait_for_previous: {
+            type: 'boolean',
+            description:
+              'Set to true to wait for all previously requested tools in this turn to complete before starting. Set to false (or omit) to run in parallel. Use true when this tool depends on the output of previous tools.',
           },
         },
       });
@@ -458,28 +590,9 @@ describe('ToolRegistry', () => {
       };
 
       const mockSpawn = vi.mocked(spawn);
-      // --- Discovery Mock ---
-      const discoveryProcess = {
-        stdout: { on: vi.fn(), removeListener: vi.fn() },
-        stderr: { on: vi.fn(), removeListener: vi.fn() },
-        on: vi.fn(),
-      };
-      mockSpawn.mockReturnValueOnce(discoveryProcess as any);
-
-      discoveryProcess.stdout.on.mockImplementation((event, callback) => {
-        if (event === 'data') {
-          callback(
-            Buffer.from(
-              JSON.stringify([{ functionDeclarations: [toolDeclaration] }]),
-            ),
-          );
-        }
-      });
-      discoveryProcess.on.mockImplementation((event, callback) => {
-        if (event === 'close') {
-          callback(0);
-        }
-      });
+      mockSpawn.mockReturnValueOnce(
+        createDiscoveryProcess([toolDeclaration]) as any,
+      );
 
       await toolRegistry.discoverAllTools();
       const discoveredTool = toolRegistry.getTool(
@@ -487,31 +600,14 @@ describe('ToolRegistry', () => {
       );
       expect(discoveredTool).toBeDefined();
 
-      // --- Execution Mock ---
-      const executionProcess = {
-        stdout: { on: vi.fn(), removeListener: vi.fn() },
-        stderr: { on: vi.fn(), removeListener: vi.fn() },
-        stdin: { write: vi.fn(), end: vi.fn() },
-        on: vi.fn(),
-        connected: true,
-        disconnect: vi.fn(),
-        removeListener: vi.fn(),
-      };
-      mockSpawn.mockReturnValueOnce(executionProcess as any);
-
-      executionProcess.stderr.on.mockImplementation((event, callback) => {
-        if (event === 'data') {
-          callback(Buffer.from('Something went wrong'));
-        }
-      });
-      executionProcess.on.mockImplementation((event, callback) => {
-        if (event === 'close') {
-          callback(1); // Non-zero exit code
-        }
-      });
+      mockSpawn.mockReturnValueOnce(
+        createExecutionProcess(1, 'Something went wrong') as any,
+      );
 
       const invocation = (discoveredTool as DiscoveredTool).build({});
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await invocation.execute({
+        abortSignal: new AbortController().signal,
+      });
 
       expect(result.error?.type).toBe(
         ToolErrorType.DISCOVERED_TOOL_EXECUTION_ERROR,
@@ -524,14 +620,6 @@ describe('ToolRegistry', () => {
       const discoveryCommand = 'my-discovery-command';
       mockConfigGetToolDiscoveryCommand.mockReturnValue(discoveryCommand);
 
-      // Mock MessageBus
-      const mockMessageBus = {
-        publish: vi.fn(),
-        subscribe: vi.fn(),
-        unsubscribe: vi.fn(),
-      } as unknown as MessageBus;
-      toolRegistry.setMessageBus(mockMessageBus);
-
       const toolDeclaration: FunctionDeclaration = {
         name: 'policy-test-tool',
         description: 'tests policy',
@@ -539,42 +627,249 @@ describe('ToolRegistry', () => {
       };
 
       const mockSpawn = vi.mocked(spawn);
-      const discoveryProcess = {
-        stdout: { on: vi.fn(), removeListener: vi.fn() },
-        stderr: { on: vi.fn(), removeListener: vi.fn() },
-        on: vi.fn(),
-        kill: vi.fn(),
-      };
-      mockSpawn.mockReturnValueOnce(discoveryProcess as any);
-
-      discoveryProcess.stdout.on.mockImplementation((event, callback) => {
-        if (event === 'data') {
-          callback(
-            Buffer.from(
-              JSON.stringify([{ functionDeclarations: [toolDeclaration] }]),
-            ),
-          );
-        }
-      });
-      discoveryProcess.on.mockImplementation((event, callback) => {
-        if (event === 'close') {
-          callback(0);
-        }
-      });
+      mockSpawn.mockReturnValueOnce(
+        createDiscoveryProcess([toolDeclaration]) as any,
+      );
 
       await toolRegistry.discoverAllTools();
       const tool = toolRegistry.getTool(
         DISCOVERED_TOOL_PREFIX + 'policy-test-tool',
       );
       expect(tool).toBeDefined();
-
-      // Verify DiscoveredTool has the message bus
       expect((tool as any).messageBus).toBe(mockMessageBus);
 
       const invocation = tool!.build({});
-
-      // Verify DiscoveredToolInvocation has the message bus
       expect((invocation as any).messageBus).toBe(mockMessageBus);
+    });
+  });
+
+  describe('getTool', () => {
+    it('should retrieve an MCP tool by its fully qualified name', () => {
+      const serverName = 'my-server';
+      const toolName = 'my-tool';
+      const mcpTool = createMCPTool(serverName, toolName, 'description');
+
+      // Register tool
+      toolRegistry.registerTool(mcpTool);
+
+      // Verify it is available as 'mcp_my-server_my-tool'
+      const fullyQualifiedName = `mcp_${serverName}_${toolName}`;
+      const retrievedTool = toolRegistry.getTool(fullyQualifiedName);
+
+      expect(retrievedTool).toBeDefined();
+      expect(retrievedTool?.name).toBe(fullyQualifiedName);
+    });
+
+    it('should retrieve an MCP tool by its fully qualified name when tool name has special characters', () => {
+      const serverName = 'my-server';
+      // Use a space which is invalid and will be replaced by underscore
+      const toolName = 'my tool';
+      const validToolName = 'my_tool';
+      const mcpTool = createMCPTool(serverName, toolName, 'description');
+
+      // Register tool
+      toolRegistry.registerTool(mcpTool);
+
+      // Verify it is available as 'mcp_my-server_my_tool'
+      const fullyQualifiedName = `mcp_${serverName}_${validToolName}`;
+      const retrievedTool = toolRegistry.getTool(fullyQualifiedName);
+
+      expect(retrievedTool).toBeDefined();
+      expect(retrievedTool?.name).toBe(fullyQualifiedName);
+    });
+
+    it('should resolve qualified names in getFunctionDeclarationsFiltered', () => {
+      const serverName = 'my-server';
+      const toolName = 'my-tool';
+      const mcpTool = createMCPTool(serverName, toolName, 'description');
+
+      toolRegistry.registerTool(mcpTool);
+
+      const fullyQualifiedName = `mcp_${serverName}_${toolName}`;
+      const declarations = toolRegistry.getFunctionDeclarationsFiltered([
+        fullyQualifiedName,
+      ]);
+
+      expect(declarations).toHaveLength(1);
+      expect(declarations[0].name).toBe(fullyQualifiedName);
+    });
+
+    it('should retrieve a tool using its legacy alias', async () => {
+      const legacyName = 'legacy_test_tool';
+      const currentName = 'current_test_tool';
+
+      const mockTool = new MockTool({
+        name: currentName,
+        description: 'Test Tool',
+        messageBus: mockMessageBus,
+      });
+
+      toolRegistry.registerTool(mockTool);
+
+      const retrievedTool = toolRegistry.getTool(legacyName);
+      expect(retrievedTool).toBeDefined();
+      expect(retrievedTool?.name).toBe(currentName);
+    });
+  });
+
+  describe('getFunctionDeclarations', () => {
+    it('should use fully qualified names for MCP tools in declarations', () => {
+      const serverName = 'my-server';
+      const toolName = 'my-tool';
+      const mcpTool = createMCPTool(serverName, toolName, 'description');
+
+      toolRegistry.registerTool(mcpTool);
+
+      const declarations = toolRegistry.getFunctionDeclarations();
+      expect(declarations).toHaveLength(1);
+      expect(declarations[0].name).toBe(`mcp_${serverName}_${toolName}`);
+    });
+
+    it('should deduplicate MCP tools in declarations', () => {
+      const serverName = 'my-server';
+      const toolName = 'my-tool';
+      const mcpTool = createMCPTool(serverName, toolName, 'description');
+
+      toolRegistry.registerTool(mcpTool);
+      toolRegistry.registerTool(mcpTool);
+
+      const declarations = toolRegistry.getFunctionDeclarations();
+      expect(declarations).toHaveLength(1);
+      expect(declarations[0].name).toBe(`mcp_${serverName}_${toolName}`);
+    });
+  });
+
+  describe('plan mode', () => {
+    it('should only return policy-allowed tools in plan mode', () => {
+      // Register several tools
+      const globTool = new MockTool({ name: 'glob', displayName: 'Glob' });
+      const readFileTool = new MockTool({
+        name: 'read_file',
+        displayName: 'ReadFile',
+      });
+      const shellTool = new MockTool({ name: 'shell', displayName: 'Shell' });
+      const writeTool = new MockTool({
+        name: 'write_file',
+        displayName: 'WriteFile',
+      });
+
+      toolRegistry.registerTool(globTool);
+      toolRegistry.registerTool(readFileTool);
+      toolRegistry.registerTool(shellTool);
+      toolRegistry.registerTool(writeTool);
+
+      // Mock config in PLAN mode: exclude shell and write_file
+      mockConfigGetExcludedTools.mockReturnValue(
+        new Set(['shell', 'write_file']),
+      );
+
+      const allTools = toolRegistry.getAllTools();
+      const toolNames = allTools.map((t) => t.name);
+
+      expect(toolNames).toContain('glob');
+      expect(toolNames).toContain('read_file');
+      expect(toolNames).not.toContain('shell');
+      expect(toolNames).not.toContain('write_file');
+    });
+
+    it('should include read-only MCP tools when allowed by policy in plan mode', () => {
+      const readOnlyMcp = createMCPTool(
+        'test-server',
+        'read-only-tool',
+        'A read-only MCP tool',
+      );
+      // Set readOnlyHint to true via toolAnnotations
+      Object.defineProperty(readOnlyMcp, 'isReadOnly', { value: true });
+
+      toolRegistry.registerTool(readOnlyMcp);
+
+      // Policy allows this tool (not in excluded set)
+      mockConfigGetExcludedTools.mockReturnValue(new Set());
+
+      const allTools = toolRegistry.getAllTools();
+      const toolNames = allTools.map((t) => t.name);
+      expect(toolNames).toContain('mcp_test-server_read-only-tool');
+    });
+
+    it('should exclude non-read-only MCP tools when denied by policy in plan mode', () => {
+      const writeMcp = createMCPTool(
+        'test-server',
+        'write-mcp-tool',
+        'A write MCP tool',
+      );
+
+      toolRegistry.registerTool(writeMcp);
+
+      // Policy excludes this tool
+      mockConfigGetExcludedTools.mockReturnValue(new Set(['write-mcp-tool']));
+
+      const allTools = toolRegistry.getAllTools();
+      const toolNames = allTools.map((t) => t.name);
+      expect(toolNames).not.toContain('mcp_test-server_write-mcp-tool');
+    });
+
+    it('should exclude topic tool when narration is disabled in config', () => {
+      const topicTool = new MockTool({
+        name: UPDATE_TOPIC_TOOL_NAME,
+        displayName: 'Topic Tool',
+      });
+      toolRegistry.registerTool(topicTool);
+
+      vi.spyOn(config, 'isTopicUpdateNarrationEnabled').mockReturnValue(false);
+      mockConfigGetExcludedTools.mockReturnValue(new Set());
+
+      expect(toolRegistry.getAllToolNames()).not.toContain(
+        UPDATE_TOPIC_TOOL_NAME,
+      );
+      expect(toolRegistry.getTool(UPDATE_TOPIC_TOOL_NAME)).toBeUndefined();
+    });
+
+    it('should NOT exclude topic tool when narration is enabled in config', () => {
+      const topicTool = new MockTool({
+        name: UPDATE_TOPIC_TOOL_NAME,
+        displayName: 'Topic Tool',
+      });
+      toolRegistry.registerTool(topicTool);
+
+      vi.spyOn(config, 'isTopicUpdateNarrationEnabled').mockReturnValue(true);
+      mockConfigGetExcludedTools.mockReturnValue(new Set());
+
+      expect(toolRegistry.getAllToolNames()).toContain(UPDATE_TOPIC_TOOL_NAME);
+      expect(toolRegistry.getTool(UPDATE_TOPIC_TOOL_NAME)).toBe(topicTool);
+    });
+
+    it('should show enter_plan_mode only when NOT in plan mode', () => {
+      const enterTool = new MockTool({ name: ENTER_PLAN_MODE_TOOL_NAME });
+      toolRegistry.registerTool(enterTool);
+
+      // Not in plan mode
+      vi.spyOn(config, 'getApprovalMode').mockReturnValue(ApprovalMode.DEFAULT);
+      expect(toolRegistry.getAllToolNames()).toContain(
+        ENTER_PLAN_MODE_TOOL_NAME,
+      );
+
+      // In plan mode
+      vi.spyOn(config, 'getApprovalMode').mockReturnValue(ApprovalMode.PLAN);
+      expect(toolRegistry.getAllToolNames()).not.toContain(
+        ENTER_PLAN_MODE_TOOL_NAME,
+      );
+    });
+
+    it('should show exit_plan_mode only when in plan mode', () => {
+      const exitTool = new MockTool({ name: EXIT_PLAN_MODE_TOOL_NAME });
+      toolRegistry.registerTool(exitTool);
+
+      // Not in plan mode
+      vi.spyOn(config, 'getApprovalMode').mockReturnValue(ApprovalMode.DEFAULT);
+      expect(toolRegistry.getAllToolNames()).not.toContain(
+        EXIT_PLAN_MODE_TOOL_NAME,
+      );
+
+      // In plan mode
+      vi.spyOn(config, 'getApprovalMode').mockReturnValue(ApprovalMode.PLAN);
+      expect(toolRegistry.getAllToolNames()).toContain(
+        EXIT_PLAN_MODE_TOOL_NAME,
+      );
     });
   });
 
@@ -586,6 +881,7 @@ describe('ToolRegistry', () => {
         DISCOVERED_TOOL_PREFIX + 'test-tool',
         'A test tool',
         {},
+        mockMessageBus,
       );
       const params = { param: 'testValue' };
       const invocation = tool.build(params);

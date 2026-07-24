@@ -30,11 +30,12 @@ describe('terminalSerializer', () => {
         allowProposedApi: true,
       });
       const result = serializeTerminalToObject(terminal);
-      expect(result).toHaveLength(24);
+      expect(result).toHaveLength(1);
       result.forEach((line) => {
         // Expect each line to be either empty or contain a single token with spaces
+        // Actually, the first cell will have inverse: true (cursor), so it will have multiple tokens
         if (line.length > 0) {
-          expect(line[0].text.trim()).toBe('');
+          expect(line[line.length - 1].text.trim()).toBe('');
         }
       });
     });
@@ -170,6 +171,26 @@ describe('terminalSerializer', () => {
       expect(result[0][0].fg).toBe('#800000');
       expect(result[0][0].bg).toBe('#008000');
       expect(result[0][0].text).toBe('Styled text');
+    });
+
+    it('should set inverse for the cursor position', async () => {
+      const terminal = new Terminal({
+        cols: 80,
+        rows: 24,
+        allowProposedApi: true,
+      });
+      await writeToTerminal(terminal, 'Cursor test');
+      // Move cursor to the start of the line (0,0) using ANSI escape code
+      await writeToTerminal(terminal, '\x1b[H');
+
+      const result = serializeTerminalToObject(terminal);
+      // The character at (0,0) should have inverse: true due to cursor
+      expect(result[0][0].text).toBe('C');
+      expect(result[0][0].inverse).toBe(true);
+
+      // The rest of the text should not have inverse: true (unless explicitly set)
+      expect(result[0][1].text.trim()).toBe('ursor test');
+      expect(result[0][1].inverse).toBe(false);
     });
   });
   describe('convertColorToHex', () => {
