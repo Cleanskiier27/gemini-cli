@@ -14,6 +14,8 @@ import {
   getErrorMessage,
 } from '@google/gemini-cli-core';
 import { promptForSetting } from '../../config/extensions/extensionSettings.js';
+import { exitCli } from '../utils.js';
+import { McpServerEnablementManager } from '../../config/mcp/mcpServerEnablement.js';
 
 interface EnableArgs {
   name: string;
@@ -32,10 +34,30 @@ export async function handleEnable(args: EnableArgs) {
 
   try {
     if (args.scope?.toLowerCase() === 'workspace') {
-      extensionManager.enableExtension(args.name, SettingScope.Workspace);
+      await extensionManager.enableExtension(args.name, SettingScope.Workspace);
     } else {
-      extensionManager.enableExtension(args.name, SettingScope.User);
+      await extensionManager.enableExtension(args.name, SettingScope.User);
     }
+
+    // Auto-enable any disabled MCP servers for this extension
+    const extension = extensionManager
+      .getExtensions()
+      .find((e) => e.name === args.name);
+
+    if (extension?.mcpServers) {
+      const mcpEnablementManager = McpServerEnablementManager.getInstance();
+      const enabledServers = await mcpEnablementManager.autoEnableServers(
+        Object.keys(extension.mcpServers ?? {}),
+      );
+
+      for (const serverName of enabledServers) {
+        debugLogger.log(
+          `MCP server '${serverName}' was disabled - now enabled.`,
+        );
+      }
+      // Note: No restartServer() - CLI exits immediately, servers load on next session
+    }
+
     if (args.scope) {
       debugLogger.log(
         `Extension "${args.name}" successfully enabled for scope "${args.scope}".`,
@@ -69,7 +91,7 @@ export const enableCommand: CommandModule = {
           argv.scope &&
           !Object.values(SettingScope)
             .map((s) => s.toLowerCase())
-            .includes((argv.scope as string).toLowerCase())
+            .includes(argv.scope.toLowerCase())
         ) {
           throw new Error(
             `Invalid scope: ${argv.scope}. Please use one of ${Object.values(
@@ -81,10 +103,13 @@ export const enableCommand: CommandModule = {
         }
         return true;
       }),
-  handler: (argv) => {
-    handleEnable({
+  handler: async (argv) => {
+    await handleEnable({
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       name: argv['name'] as string,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       scope: argv['scope'] as string,
     });
+    await exitCli();
   },
 };

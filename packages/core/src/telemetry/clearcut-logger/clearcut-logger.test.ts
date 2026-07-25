@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import 'vitest';
 import {
   vi,
   describe,
@@ -13,18 +12,27 @@ import {
   afterEach,
   beforeAll,
   afterAll,
+  beforeEach,
 } from 'vitest';
-import type { LogEvent, LogEventEntry } from './clearcut-logger.js';
-import { ClearcutLogger, EventNames, TEST_ONLY } from './clearcut-logger.js';
-import type { ContentGeneratorConfig } from '../../core/contentGenerator.js';
-import { AuthType } from '../../core/contentGenerator.js';
-import type { SuccessfulToolCall } from '../../core/coreToolScheduler.js';
+import {
+  ClearcutLogger,
+  EventNames,
+  TEST_ONLY,
+  type LogEvent,
+  type LogEventEntry,
+} from './clearcut-logger.js';
+import {
+  AuthType,
+  type ContentGeneratorConfig,
+} from '../../core/contentGenerator.js';
+import type { SuccessfulToolCall } from '../../scheduler/types.js';
 import type { ConfigParameters } from '../../config/config.js';
 import { EventMetadataKey } from './event-metadata-key.js';
 import { makeFakeConfig } from '../../test-utils/config.js';
 import { http, HttpResponse } from 'msw';
 import { server } from '../../mocks/msw.js';
 import {
+  StartSessionEvent,
   UserPromptEvent,
   makeChatCompressionEvent,
   ModelRoutingEvent,
@@ -32,21 +40,36 @@ import {
   AgentStartEvent,
   AgentFinishEvent,
   WebFetchFallbackAttemptEvent,
+  HookCallEvent,
+  OnboardingStartEvent,
+  OnboardingSuccessEvent,
 } from '../types.js';
+import { HookType } from '../../hooks/types.js';
 import { AgentTerminateMode } from '../../agents/types.js';
+import { ApprovalMode } from '../../policy/types.js';
 import { GIT_COMMIT_INFO, CLI_VERSION } from '../../generated/git-commit.js';
 import { UserAccountManager } from '../../utils/userAccountManager.js';
 import { InstallationManager } from '../../utils/installationManager.js';
+
+import si, { type Systeminformation } from 'systeminformation';
+import * as os from 'node:os';
+import {
+  CreditsUsedEvent,
+  OverageOptionSelectedEvent,
+  EmptyWalletMenuShownEvent,
+  CreditPurchaseClickEvent,
+} from '../billingEvents.js';
 
 interface CustomMatchers<R = unknown> {
   toHaveMetadataValue: ([key, value]: [EventMetadataKey, string]) => R;
   toHaveEventName: (name: EventNames) => R;
   toHaveMetadataKey: (key: EventMetadataKey) => R;
+  toHaveGwsExperiments: (exps: number[]) => R;
 }
 
 declare module 'vitest' {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-empty-object-type
-  interface Matchers<T = any> extends CustomMatchers<T> {}
+  interface Assertion<T = any> extends CustomMatchers<T> {}
 }
 
 expect.extend({
@@ -65,7 +88,6 @@ expect.extend({
     received: LogEventEntry[],
     [key, value]: [EventMetadataKey, string],
   ) {
-    const { isNot } = this;
     const event = JSON.parse(received[0].source_extension_json) as LogEvent;
     const metadata = event['event_metadata'][0];
     const data = metadata.find((m) => m.gemini_cli_key === key)?.value;
@@ -74,8 +96,7 @@ expect.extend({
 
     return {
       pass,
-      message: () =>
-        `event ${received} does${isNot ? ' not' : ''} have ${value}}`,
+      message: () => `event ${received} should have: ${value}. Found: ${data}`,
     };
   },
 
@@ -92,13 +113,51 @@ expect.extend({
         `event ${received} ${isNot ? 'has' : 'does not have'} the metadata key ${key}`,
     };
   },
+
+  toHaveGwsExperiments(received: LogEventEntry[], exps: number[]) {
+    const { isNot } = this;
+    const gwsExperiment = received[0].exp?.gws_experiment;
+
+    const pass =
+      gwsExperiment !== undefined &&
+      gwsExperiment.length === exps.length &&
+      gwsExperiment.every((val, idx) => val === exps[idx]);
+
+    return {
+      pass,
+      message: () =>
+        `exp.gws_experiment ${JSON.stringify(gwsExperiment)} does${isNot ? '' : ' not'} match ${JSON.stringify(exps)}`,
+    };
+  },
+});
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return {
+    ...actual,
+    cpus: vi.fn(() => [{ model: 'Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz' }]),
+    availableParallelism: vi.fn(() => 8),
+    totalmem: vi.fn(() => 32 * 1024 * 1024 * 1024),
+  };
 });
 
 vi.mock('../../utils/userAccountManager.js');
 vi.mock('../../utils/installationManager.js');
+vi.mock('systeminformation', () => ({
+  default: {
+    graphics: vi.fn().mockResolvedValue({
+      controllers: [{ model: 'Mock GPU' }],
+    }),
+  },
+}));
 
 const mockUserAccount = vi.mocked(UserAccountManager.prototype);
 const mockInstallMgr = vi.mocked(InstallationManager.prototype);
+
+beforeEach(() => {
+  // Ensure Antigravity detection doesn't interfere with other tests
+  vi.stubEnv('ANTIGRAVITY_CLI_ALIAS', '');
+});
 
 // TODO(richieforeman): Consider moving this to test setup globally.
 beforeAll(() => {
@@ -132,8 +191,29 @@ describe('ClearcutLogger', () => {
     vi.unstubAllEnvs();
   });
 
+  beforeEach(() => {
+    vi.stubEnv('ANTIGRAVITY_CLI_ALIAS', '');
+    vi.stubEnv('TERM_PROGRAM', '');
+    vi.stubEnv('CURSOR_TRACE_ID', '');
+    vi.stubEnv('CODESPACES', '');
+    vi.stubEnv('VSCODE_IPC_HOOK_CLI', '');
+    vi.stubEnv('EDITOR_IN_CLOUD_SHELL', '');
+    vi.stubEnv('CLOUD_SHELL', '');
+    vi.stubEnv('TERM_PRODUCT', '');
+    vi.stubEnv('MONOSPACE_ENV', '');
+    vi.stubEnv('REPLIT_USER', '');
+    vi.stubEnv('__COG_BASHRC_SOURCED', '');
+    vi.stubEnv('GH_PR_NUMBER', '');
+    vi.stubEnv('GH_ISSUE_NUMBER', '');
+    vi.stubEnv('GH_CUSTOM_TRACKING_ID', '');
+  });
+
   function setup({
-    config = {} as Partial<ConfigParameters>,
+    config = {
+      experiments: {
+        experimentIds: [123, 456, 789],
+      },
+    } as unknown as Partial<ConfigParameters>,
     lifetimeGoogleAccounts = 1,
     cachedGoogleAccount = 'test@google.com',
   } = {}) {
@@ -164,6 +244,7 @@ describe('ClearcutLogger', () => {
 
   afterEach(() => {
     ClearcutLogger.clearInstance();
+    TEST_ONLY.resetCachedGpuInfoForTesting();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -198,7 +279,7 @@ describe('ClearcutLogger', () => {
   });
 
   describe('createLogEvent', () => {
-    it('logs the total number of google accounts', () => {
+    it('logs the total number of google accounts', async () => {
       const { logger } = setup({
         lifetimeGoogleAccounts: 9001,
       });
@@ -275,6 +356,10 @@ describe('ClearcutLogger', () => {
             gemini_cli_key: EventMetadataKey.GEMINI_CLI_USER_SETTINGS,
             value: logger?.getConfigJson(),
           },
+          {
+            gemini_cli_key: EventMetadataKey.GEMINI_CLI_ACTIVE_APPROVAL_MODE,
+            value: 'default',
+          },
         ]),
       );
     });
@@ -292,7 +377,7 @@ describe('ClearcutLogger', () => {
 
     it('logs all user settings', () => {
       const { logger } = setup({
-        config: { useSmartEdit: true, useModelRouter: true },
+        config: {},
       });
 
       vi.stubEnv('TERM_PROGRAM', 'vscode');
@@ -304,6 +389,93 @@ describe('ClearcutLogger', () => {
         gemini_cli_key: EventMetadataKey.GEMINI_CLI_USER_SETTINGS,
         value: logger?.getConfigJson(),
       });
+    });
+
+    it('logs the GPU information (single GPU)', async () => {
+      vi.mocked(si.graphics).mockResolvedValueOnce({
+        controllers: [{ model: 'Single GPU' }],
+      } as unknown as Systeminformation.GraphicsData);
+      const { logger, loggerConfig } = setup({});
+
+      await logger?.logStartSessionEvent(new StartSessionEvent(loggerConfig));
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+
+      const gpuInfoEntry = event?.event_metadata[0].find(
+        (item) => item.gemini_cli_key === EventMetadataKey.GEMINI_CLI_GPU_INFO,
+      );
+      expect(gpuInfoEntry).toBeDefined();
+      expect(gpuInfoEntry?.value).toBe('Single GPU');
+    });
+
+    it('logs multiple GPUs', async () => {
+      vi.mocked(si.graphics).mockResolvedValueOnce({
+        controllers: [{ model: 'GPU 1' }, { model: 'GPU 2' }],
+      } as unknown as Systeminformation.GraphicsData);
+      const { logger, loggerConfig } = setup({});
+
+      await logger?.logStartSessionEvent(new StartSessionEvent(loggerConfig));
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const metadata = event?.event_metadata[0];
+
+      const gpuInfoEntry = metadata?.find(
+        (m) => m.gemini_cli_key === EventMetadataKey.GEMINI_CLI_GPU_INFO,
+      );
+      expect(gpuInfoEntry?.value).toBe('GPU 1, GPU 2');
+    });
+
+    it('logs NA when no GPUs are found', async () => {
+      vi.mocked(si.graphics).mockResolvedValueOnce({
+        controllers: [],
+      } as unknown as Systeminformation.GraphicsData);
+      const { logger, loggerConfig } = setup({});
+
+      await logger?.logStartSessionEvent(new StartSessionEvent(loggerConfig));
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const metadata = event?.event_metadata[0];
+
+      const gpuInfoEntry = metadata?.find(
+        (m) => m.gemini_cli_key === EventMetadataKey.GEMINI_CLI_GPU_INFO,
+      );
+      expect(gpuInfoEntry?.value).toBe('NA');
+    });
+
+    it('logs FAILED when GPU detection fails', async () => {
+      vi.mocked(si.graphics).mockRejectedValueOnce(
+        new Error('Detection failed'),
+      );
+      const { logger, loggerConfig } = setup({});
+
+      await logger?.logStartSessionEvent(new StartSessionEvent(loggerConfig));
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+
+      expect(event?.event_metadata[0]).toContainEqual({
+        gemini_cli_key: EventMetadataKey.GEMINI_CLI_GPU_INFO,
+        value: 'FAILED',
+      });
+    });
+
+    it('handles empty os.cpus() gracefully', async () => {
+      const { logger, loggerConfig } = setup({});
+      vi.mocked(os.cpus).mockReturnValueOnce([]);
+
+      await logger?.logStartSessionEvent(new StartSessionEvent(loggerConfig));
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const metadata = event?.event_metadata[0];
+
+      const cpuInfoEntry = metadata?.find(
+        (m) => m.gemini_cli_key === EventMetadataKey.GEMINI_CLI_CPU_INFO,
+      );
+      expect(cpuInfoEntry).toBeUndefined();
+
+      const cpuCoresEntry = metadata?.find(
+        (m) => m.gemini_cli_key === EventMetadataKey.GEMINI_CLI_CPU_CORES,
+      );
+      expect(cpuCoresEntry?.value).toBe('8');
     });
 
     type SurfaceDetectionTestCase = {
@@ -334,8 +506,19 @@ describe('ClearcutLogger', () => {
           TERM_PROGRAM: 'vscode',
           GITHUB_SHA: undefined,
           MONOSPACE_ENV: '',
+          POSITRON: '',
         },
         expected: 'vscode',
+      },
+      {
+        name: 'Positron via TERM_PROGRAM',
+        env: {
+          TERM_PROGRAM: 'vscode',
+          GITHUB_SHA: undefined,
+          MONOSPACE_ENV: '',
+          POSITRON: '1',
+        },
+        expected: 'positron',
       },
       {
         name: 'SURFACE env var',
@@ -374,6 +557,15 @@ describe('ClearcutLogger', () => {
         },
         expected: 'devin',
       },
+      {
+        name: 'unidentified',
+        env: {
+          GITHUB_SHA: undefined,
+          TERM_PROGRAM: undefined,
+          SURFACE: undefined,
+        },
+        expected: 'SURFACE_NOT_SET',
+      },
     ])(
       'logs the current surface as $expected from $name',
       ({ env, expected }) => {
@@ -388,6 +580,213 @@ describe('ClearcutLogger', () => {
         });
       },
     );
+  });
+
+  describe('GH_WORKFLOW_NAME metadata', () => {
+    it('includes workflow name when GH_WORKFLOW_NAME is set', () => {
+      const { logger } = setup({});
+      vi.stubEnv('GH_WORKFLOW_NAME', 'test-workflow');
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      expect(event?.event_metadata[0]).toContainEqual({
+        gemini_cli_key: EventMetadataKey.GEMINI_CLI_GH_WORKFLOW_NAME,
+        value: 'test-workflow',
+      });
+    });
+
+    it('does not include workflow name when GH_WORKFLOW_NAME is not set', () => {
+      const { logger } = setup({});
+      vi.stubEnv('GH_WORKFLOW_NAME', undefined);
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const hasWorkflowName = event?.event_metadata[0].some(
+        (item) =>
+          item.gemini_cli_key === EventMetadataKey.GEMINI_CLI_GH_WORKFLOW_NAME,
+      );
+      expect(hasWorkflowName).toBe(false);
+    });
+  });
+
+  describe('GITHUB_EVENT_NAME metadata', () => {
+    it('includes event name when GITHUB_EVENT_NAME is set', () => {
+      const { logger } = setup({});
+      vi.stubEnv('GITHUB_EVENT_NAME', 'issues');
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      expect(event?.event_metadata[0]).toContainEqual({
+        gemini_cli_key: EventMetadataKey.GEMINI_CLI_GH_EVENT_NAME,
+        value: 'issues',
+      });
+    });
+
+    it('does not include event name when GITHUB_EVENT_NAME is not set', () => {
+      const { logger } = setup({});
+      vi.stubEnv('GITHUB_EVENT_NAME', undefined);
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const hasEventName = event?.event_metadata[0].some(
+        (item) =>
+          item.gemini_cli_key === EventMetadataKey.GEMINI_CLI_GH_EVENT_NAME,
+      );
+      expect(hasEventName).toBe(false);
+    });
+  });
+
+  describe('GH_PR_NUMBER metadata', () => {
+    it('includes PR number when GH_PR_NUMBER is set', () => {
+      vi.stubEnv('GH_PR_NUMBER', '123');
+      const { logger } = setup({});
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+
+      expect(event?.event_metadata[0]).toContainEqual({
+        gemini_cli_key: EventMetadataKey.GEMINI_CLI_GH_PR_NUMBER,
+        value: '123',
+      });
+    });
+
+    it('does not include PR number when GH_PR_NUMBER is not set', () => {
+      vi.stubEnv('GH_PR_NUMBER', undefined);
+      const { logger } = setup({});
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const hasPRNumber = event?.event_metadata[0].some(
+        (item) =>
+          item.gemini_cli_key === EventMetadataKey.GEMINI_CLI_GH_PR_NUMBER,
+      );
+      expect(hasPRNumber).toBe(false);
+    });
+  });
+
+  describe('GH_ISSUE_NUMBER metadata', () => {
+    it('includes issue number when GH_ISSUE_NUMBER is set', () => {
+      vi.stubEnv('GH_ISSUE_NUMBER', '456');
+      const { logger } = setup({});
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+
+      expect(event?.event_metadata[0]).toContainEqual({
+        gemini_cli_key: EventMetadataKey.GEMINI_CLI_GH_ISSUE_NUMBER,
+        value: '456',
+      });
+    });
+
+    it('does not include issue number when GH_ISSUE_NUMBER is not set', () => {
+      vi.stubEnv('GH_ISSUE_NUMBER', undefined);
+      const { logger } = setup({});
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const hasIssueNumber = event?.event_metadata[0].some(
+        (item) =>
+          item.gemini_cli_key === EventMetadataKey.GEMINI_CLI_GH_ISSUE_NUMBER,
+      );
+      expect(hasIssueNumber).toBe(false);
+    });
+  });
+
+  describe('GH_CUSTOM_TRACKING_ID metadata', () => {
+    it('includes custom tracking ID when GH_CUSTOM_TRACKING_ID is set', () => {
+      vi.stubEnv('GH_CUSTOM_TRACKING_ID', 'abc-789');
+      const { logger } = setup({});
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+
+      expect(event?.event_metadata[0]).toContainEqual({
+        gemini_cli_key: EventMetadataKey.GEMINI_CLI_GH_CUSTOM_TRACKING_ID,
+        value: 'abc-789',
+      });
+    });
+
+    it('does not include custom tracking ID when GH_CUSTOM_TRACKING_ID is not set', () => {
+      vi.stubEnv('GH_CUSTOM_TRACKING_ID', undefined);
+      const { logger } = setup({});
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const hasTrackingId = event?.event_metadata[0].some(
+        (item) =>
+          item.gemini_cli_key ===
+          EventMetadataKey.GEMINI_CLI_GH_CUSTOM_TRACKING_ID,
+      );
+      expect(hasTrackingId).toBe(false);
+    });
+  });
+
+  describe('GITHUB_REPOSITORY metadata', () => {
+    it('includes hashed repository when GITHUB_REPOSITORY is set', () => {
+      vi.stubEnv('GITHUB_REPOSITORY', 'google/gemini-cli');
+      const { logger } = setup({});
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const repositoryMetadata = event?.event_metadata[0].find(
+        (item) =>
+          item.gemini_cli_key ===
+          EventMetadataKey.GEMINI_CLI_GH_REPOSITORY_NAME_HASH,
+      );
+      expect(repositoryMetadata).toBeDefined();
+      expect(repositoryMetadata?.value).toMatch(/^[a-f0-9]{64}$/);
+      expect(repositoryMetadata?.value).not.toBe('google/gemini-cli');
+    });
+
+    it('hashes repository name consistently', () => {
+      vi.stubEnv('GITHUB_REPOSITORY', 'google/gemini-cli');
+      const { logger } = setup({});
+
+      const event1 = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const event2 = logger?.createLogEvent(EventNames.API_ERROR, []);
+
+      const hash1 = event1?.event_metadata[0].find(
+        (item) =>
+          item.gemini_cli_key ===
+          EventMetadataKey.GEMINI_CLI_GH_REPOSITORY_NAME_HASH,
+      )?.value;
+      const hash2 = event2?.event_metadata[0].find(
+        (item) =>
+          item.gemini_cli_key ===
+          EventMetadataKey.GEMINI_CLI_GH_REPOSITORY_NAME_HASH,
+      )?.value;
+
+      expect(hash1).toBeDefined();
+      expect(hash2).toBeDefined();
+      expect(hash1).toBe(hash2);
+    });
+
+    it('produces different hashes for different repositories', () => {
+      vi.stubEnv('GITHUB_REPOSITORY', 'google/gemini-cli');
+      const { logger: logger1 } = setup({});
+      const event1 = logger1?.createLogEvent(EventNames.API_ERROR, []);
+      const hash1 = event1?.event_metadata[0].find(
+        (item) =>
+          item.gemini_cli_key ===
+          EventMetadataKey.GEMINI_CLI_GH_REPOSITORY_NAME_HASH,
+      )?.value;
+
+      vi.stubEnv('GITHUB_REPOSITORY', 'google/other-repo');
+      ClearcutLogger.clearInstance();
+      const { logger: logger2 } = setup({});
+      const event2 = logger2?.createLogEvent(EventNames.API_ERROR, []);
+      const hash2 = event2?.event_metadata[0].find(
+        (item) =>
+          item.gemini_cli_key ===
+          EventMetadataKey.GEMINI_CLI_GH_REPOSITORY_NAME_HASH,
+      )?.value;
+
+      expect(hash1).toBeDefined();
+      expect(hash2).toBeDefined();
+      expect(hash1).not.toBe(hash2);
+    });
+
+    it('does not include repository when GITHUB_REPOSITORY is not set', () => {
+      vi.stubEnv('GITHUB_REPOSITORY', undefined);
+      const { logger } = setup({});
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+      const hasRepository = event?.event_metadata[0].some(
+        (item) =>
+          item.gemini_cli_key ===
+          EventMetadataKey.GEMINI_CLI_GH_REPOSITORY_NAME_HASH,
+      );
+      expect(hasRepository).toBe(false);
+    });
   });
 
   describe('logChatCompressionEvent', () => {
@@ -530,15 +929,13 @@ describe('ClearcutLogger', () => {
       const { logger } = setup();
 
       server.resetHandlers(
-        http.post(
-          CLEARCUT_URL,
-          () =>
-            new HttpResponse(
-              { 'the system is down': true },
-              {
-                status: 500,
-              },
-            ),
+        http.post(CLEARCUT_URL, () =>
+          HttpResponse.json(
+            { 'the system is down': true },
+            {
+              status: 500,
+            },
+          ),
         ),
       );
 
@@ -628,6 +1025,7 @@ describe('ClearcutLogger', () => {
         'some reasoning',
         false,
         undefined,
+        ApprovalMode.DEFAULT,
       );
 
       logger?.logModelRoutingEvent(event);
@@ -662,6 +1060,7 @@ describe('ClearcutLogger', () => {
         'some reasoning',
         true,
         'Something went wrong',
+        ApprovalMode.DEFAULT,
       );
 
       logger?.logModelRoutingEvent(event);
@@ -690,6 +1089,39 @@ describe('ClearcutLogger', () => {
         'Something went wrong',
       ]);
     });
+
+    it('logs a successful routing event with numerical routing fields', () => {
+      const { logger } = setup();
+      const event = new ModelRoutingEvent(
+        'gemini-pro',
+        'NumericalClassifier (Strict)',
+        123,
+        '[Score: 90 / Threshold: 80] reasoning',
+        false,
+        undefined,
+        ApprovalMode.DEFAULT,
+        true,
+        '80',
+      );
+
+      logger?.logModelRoutingEvent(event);
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.MODEL_ROUTING);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_ROUTING_REASONING,
+        '[Score: 90 / Threshold: 80] reasoning',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_ROUTING_NUMERICAL_ENABLED,
+        'true',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_ROUTING_CLASSIFIER_THRESHOLD,
+        '80',
+      ]);
+    });
   });
 
   describe('logAgentStartEvent', () => {
@@ -710,6 +1142,57 @@ describe('ClearcutLogger', () => {
         EventMetadataKey.GEMINI_CLI_AGENT_NAME,
         'TestAgent',
       ]);
+    });
+  });
+
+  describe('logExperiments', () => {
+    it('async path includes exp.gws_experiment field with experiment IDs', async () => {
+      const { logger } = setup();
+      const event = logger!.createLogEvent(EventNames.START_SESSION, []);
+
+      await logger?.enqueueLogEventAfterExperimentsLoadAsync(event);
+      await vi.runAllTimersAsync();
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.START_SESSION);
+      // Both metadata and exp.gws_experiment should be populated
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_EXPERIMENT_IDS,
+        '123,456,789',
+      ]);
+      expect(events[0]).toHaveGwsExperiments([123, 456, 789]);
+    });
+
+    it('async path includes empty gws_experiment array when no experiments', async () => {
+      const { logger } = setup({
+        config: {
+          experiments: {
+            experimentIds: [],
+          },
+        } as unknown as Partial<ConfigParameters>,
+      });
+      const event = logger!.createLogEvent(EventNames.START_SESSION, []);
+
+      await logger?.enqueueLogEventAfterExperimentsLoadAsync(event);
+      await vi.runAllTimersAsync();
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveGwsExperiments([]);
+    });
+
+    it('non-async path does not include exp.gws_experiment field', () => {
+      const { logger } = setup();
+      const event = new AgentStartEvent('agent-123', 'TestAgent');
+
+      // logAgentStartEvent uses the non-async enqueueLogEvent path
+      logger?.logAgentStartEvent(event);
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      // exp.gws_experiment should NOT be present for non-async events
+      expect(events[0][0].exp).toBeUndefined();
     });
   });
 
@@ -851,8 +1334,7 @@ describe('ClearcutLogger', () => {
         status: 'success',
       } as SuccessfulToolCall;
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      logger?.logToolCallEvent(new ToolCallEvent(completedToolCall as any));
+      logger?.logToolCallEvent(new ToolCallEvent(completedToolCall));
 
       const events = getEvents(logger!);
       expect(events.length).toBe(1);
@@ -897,8 +1379,7 @@ describe('ClearcutLogger', () => {
         status: 'success',
       } as SuccessfulToolCall;
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      logger?.logToolCallEvent(new ToolCallEvent(completedToolCall as any));
+      logger?.logToolCallEvent(new ToolCallEvent(completedToolCall));
 
       const events = getEvents(logger!);
       expect(events.length).toBe(1);
@@ -906,6 +1387,117 @@ describe('ClearcutLogger', () => {
       expect(events[0]).not.toHaveMetadataKey(
         EventMetadataKey.GEMINI_CLI_AI_ADDED_LINES,
       );
+    });
+
+    it('logs AskUser tool metadata', () => {
+      const { logger } = setup();
+      const completedToolCall = {
+        request: {
+          name: 'ask_user',
+          args: { questions: [] },
+          prompt_id: 'prompt-123',
+        },
+        response: {
+          resultDisplay: 'User answered: ...',
+          data: {
+            ask_user: {
+              question_types: ['choice', 'text'],
+              dismissed: false,
+              empty_submission: false,
+              answer_count: 2,
+            },
+          },
+        },
+        status: 'success',
+      } as unknown as SuccessfulToolCall;
+
+      logger?.logToolCallEvent(new ToolCallEvent(completedToolCall));
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.TOOL_CALL);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_ASK_USER_QUESTION_TYPES,
+        JSON.stringify(['choice', 'text']),
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_ASK_USER_DISMISSED,
+        'false',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_ASK_USER_EMPTY_SUBMISSION,
+        'false',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_ASK_USER_ANSWER_COUNT,
+        '2',
+      ]);
+    });
+
+    it('does not log AskUser tool metadata for other tools', () => {
+      const { logger } = setup();
+      const completedToolCall = {
+        request: {
+          name: 'some_other_tool',
+          args: {},
+          prompt_id: 'prompt-123',
+        },
+        response: {
+          resultDisplay: 'Result',
+          data: {
+            ask_user_question_types: ['choice', 'text'],
+            ask_user_dismissed: false,
+            ask_user_empty_submission: false,
+            ask_user_answer_count: 2,
+          },
+        },
+        status: 'success',
+      } as unknown as SuccessfulToolCall;
+
+      logger?.logToolCallEvent(new ToolCallEvent(completedToolCall));
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.TOOL_CALL);
+      expect(events[0]).not.toHaveMetadataKey(
+        EventMetadataKey.GEMINI_CLI_ASK_USER_QUESTION_TYPES,
+      );
+      expect(events[0]).not.toHaveMetadataKey(
+        EventMetadataKey.GEMINI_CLI_ASK_USER_DISMISSED,
+      );
+      expect(events[0]).not.toHaveMetadataKey(
+        EventMetadataKey.GEMINI_CLI_ASK_USER_EMPTY_SUBMISSION,
+      );
+      expect(events[0]).not.toHaveMetadataKey(
+        EventMetadataKey.GEMINI_CLI_ASK_USER_ANSWER_COUNT,
+      );
+    });
+  });
+
+  describe('flushIfNeeded', () => {
+    it('should not flush if the interval has not passed', () => {
+      const { logger } = setup();
+      const flushSpy = vi
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .spyOn(logger!, 'flushToClearcut' as any)
+        .mockResolvedValue({ nextRequestWaitMs: 0 });
+
+      logger!.flushIfNeeded();
+      expect(flushSpy).not.toHaveBeenCalled();
+    });
+
+    it('should flush if the interval has passed', async () => {
+      const { logger } = setup();
+      const flushSpy = vi
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .spyOn(logger!, 'flushToClearcut' as any)
+        .mockResolvedValue({ nextRequestWaitMs: 0 });
+
+      // Advance time by more than the flush interval
+      await vi.advanceTimersByTimeAsync(1000 * 60 * 2);
+
+      logger!.flushIfNeeded();
+      expect(flushSpy).toHaveBeenCalled();
     });
   });
 
@@ -922,6 +1514,362 @@ describe('ClearcutLogger', () => {
       expect(events[0]).toHaveMetadataValue([
         EventMetadataKey.GEMINI_CLI_WEB_FETCH_FALLBACK_REASON,
         'private_ip',
+      ]);
+    });
+  });
+
+  describe('logHookCallEvent', () => {
+    it('logs an event with proper fields', () => {
+      const { logger } = setup();
+      const hookName = '/path/to/my/script.sh';
+
+      const event = new HookCallEvent(
+        'before-tool',
+        HookType.Command,
+        hookName,
+        {}, // input
+        150, // duration
+        true, // success
+        {}, // output
+        0, // exit code
+      );
+
+      logger?.logHookCallEvent(event);
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.HOOK_CALL);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_HOOK_EVENT_NAME,
+        'before-tool',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_HOOK_DURATION_MS,
+        '150',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_HOOK_SUCCESS,
+        'true',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_HOOK_EXIT_CODE,
+        '0',
+      ]);
+    });
+  });
+
+  describe('logCreditsUsedEvent', () => {
+    it('logs an event with model, consumed, and remaining credits', () => {
+      const { logger } = setup();
+      const event = new CreditsUsedEvent('gemini-3-pro-preview', 10, 490);
+
+      logger?.logCreditsUsedEvent(event);
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.CREDITS_USED);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BILLING_MODEL,
+        '"gemini-3-pro-preview"',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BILLING_CREDITS_CONSUMED,
+        '10',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BILLING_CREDITS_REMAINING,
+        '490',
+      ]);
+    });
+  });
+
+  describe('logOverageOptionSelectedEvent', () => {
+    it('logs an event with model, selected option, and credit balance', () => {
+      const { logger } = setup();
+      const event = new OverageOptionSelectedEvent(
+        'gemini-3-pro-preview',
+        'use_credits',
+        350,
+      );
+
+      logger?.logOverageOptionSelectedEvent(event);
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.OVERAGE_OPTION_SELECTED);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BILLING_MODEL,
+        '"gemini-3-pro-preview"',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BILLING_SELECTED_OPTION,
+        '"use_credits"',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BILLING_CREDIT_BALANCE,
+        '350',
+      ]);
+    });
+  });
+
+  describe('logEmptyWalletMenuShownEvent', () => {
+    it('logs an event with the model', () => {
+      const { logger } = setup();
+      const event = new EmptyWalletMenuShownEvent('gemini-3-pro-preview');
+
+      logger?.logEmptyWalletMenuShownEvent(event);
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.EMPTY_WALLET_MENU_SHOWN);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BILLING_MODEL,
+        '"gemini-3-pro-preview"',
+      ]);
+    });
+  });
+
+  describe('logCreditPurchaseClickEvent', () => {
+    it('logs an event with model and source', () => {
+      const { logger } = setup();
+      const event = new CreditPurchaseClickEvent(
+        'empty_wallet_menu',
+        'gemini-3-pro-preview',
+      );
+
+      logger?.logCreditPurchaseClickEvent(event);
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.CREDIT_PURCHASE_CLICK);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BILLING_MODEL,
+        '"gemini-3-pro-preview"',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BILLING_PURCHASE_SOURCE,
+        '"empty_wallet_menu"',
+      ]);
+    });
+  });
+
+  describe('logOnboardingStartEvent', () => {
+    it('logs an event with proper name and start key', () => {
+      const { logger } = setup();
+      const event = new OnboardingStartEvent();
+
+      logger?.logOnboardingStartEvent(event);
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.ONBOARDING_START);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_ONBOARDING_START,
+        'true',
+      ]);
+    });
+  });
+
+  describe('logOnboardingSuccessEvent', () => {
+    it('logs an event with proper name and user tier', () => {
+      const { logger } = setup();
+      const event = new OnboardingSuccessEvent('standard-tier', 100);
+
+      logger?.logOnboardingSuccessEvent(event);
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.ONBOARDING_SUCCESS);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_ONBOARDING_USER_TIER,
+        'standard-tier',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_ONBOARDING_DURATION_MS,
+        '100',
+      ]);
+    });
+  });
+
+  describe('logBrowserAgentConnectionEvent', () => {
+    it('logs a successful connection event', () => {
+      const { logger } = setup();
+      logger?.logBrowserAgentConnectionEvent({
+        session_mode: 'isolated',
+        headless: true,
+        success: true,
+        duration_ms: 1500,
+      });
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.BROWSER_AGENT_CONNECTION);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_SESSION_MODE,
+        'isolated',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_HEADLESS,
+        'true',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_SUCCESS,
+        'true',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_DURATION_MS,
+        '1500',
+      ]);
+    });
+
+    it('logs a failed connection event with error_type', () => {
+      const { logger } = setup();
+      logger?.logBrowserAgentConnectionEvent({
+        session_mode: 'persistent',
+        headless: false,
+        success: false,
+        duration_ms: 30000,
+        error_type: 'timeout',
+      });
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_SUCCESS,
+        'false',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_ERROR_TYPE,
+        'timeout',
+      ]);
+    });
+
+    it('logs tool_count when provided', () => {
+      const { logger } = setup();
+      logger?.logBrowserAgentConnectionEvent({
+        session_mode: 'existing',
+        headless: true,
+        success: true,
+        duration_ms: 800,
+        tool_count: 12,
+      });
+
+      const events = getEvents(logger!);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_TOOL_COUNT,
+        '12',
+      ]);
+    });
+  });
+
+  describe('logBrowserAgentVisionStatusEvent', () => {
+    it('logs vision enabled', () => {
+      const { logger } = setup();
+      logger?.logBrowserAgentVisionStatusEvent({ enabled: true });
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.BROWSER_AGENT_VISION_STATUS);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_VISION_ENABLED,
+        'true',
+      ]);
+    });
+
+    it('logs vision disabled with reason', () => {
+      const { logger } = setup();
+      logger?.logBrowserAgentVisionStatusEvent({
+        enabled: false,
+        disabled_reason: 'no_visual_model',
+      });
+
+      const events = getEvents(logger!);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_VISION_ENABLED,
+        'false',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_VISION_DISABLED_REASON,
+        'no_visual_model',
+      ]);
+    });
+  });
+
+  describe('logBrowserAgentTaskOutcomeEvent', () => {
+    it('logs a task outcome event with all attributes', () => {
+      const { logger } = setup();
+      logger?.logBrowserAgentTaskOutcomeEvent({
+        success: true,
+        session_mode: 'isolated',
+        vision_enabled: true,
+        headless: true,
+        duration_ms: 5000,
+      });
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.BROWSER_AGENT_TASK_OUTCOME);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_SUCCESS,
+        'true',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_SESSION_MODE,
+        'isolated',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_VISION_ENABLED,
+        'true',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_HEADLESS,
+        'true',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_DURATION_MS,
+        '5000',
+      ]);
+    });
+  });
+
+  describe('logBrowserAgentCleanupEvent', () => {
+    it('logs a cleanup event with all attributes', () => {
+      const { logger } = setup();
+      logger?.logBrowserAgentCleanupEvent({
+        session_mode: 'isolated',
+        success: true,
+        duration_ms: 200,
+      });
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.BROWSER_AGENT_CLEANUP);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_SESSION_MODE,
+        'isolated',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_SUCCESS,
+        'true',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_DURATION_MS,
+        '200',
+      ]);
+    });
+
+    it('logs a failed cleanup event', () => {
+      const { logger } = setup();
+      logger?.logBrowserAgentCleanupEvent({
+        session_mode: 'persistent',
+        success: false,
+        duration_ms: 5000,
+      });
+
+      const events = getEvents(logger!);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_BROWSER_AGENT_SUCCESS,
+        'false',
       ]);
     });
   });

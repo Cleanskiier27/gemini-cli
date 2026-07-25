@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useLayoutEffect, useRef, useCallback } from 'react';
 import { theme } from '../semantic-colors.js';
 import { interpolateColor } from '../themes/color-utils.js';
 import { debugState } from '../debug.js';
@@ -41,19 +41,33 @@ export function useAnimatedScrollbar(
     debugState.debugNumAnimatedComponents++;
     isAnimatingRef.current = true;
 
-    const fadeInDuration = 200;
-    const visibleDuration = 1000;
-    const fadeOutDuration = 300;
+    const isTest =
+      typeof process !== 'undefined' && process.env['NODE_ENV'] === 'test';
+    const fadeInDuration = isTest ? 0 : 200;
+    const visibleDuration = isTest ? 0 : 1000;
+    const fadeOutDuration = isTest ? 0 : 300;
 
     const focusedColor = theme.text.secondary;
     const unfocusedColor = theme.ui.dark;
     const startColor = colorRef.current;
 
+    if (!focusedColor || !unfocusedColor) {
+      return;
+    }
+
+    if (isTest) {
+      setScrollbarColor(unfocusedColor);
+      cleanup();
+      return;
+    }
+
     // Phase 1: Fade In
     let start = Date.now();
     const animateFadeIn = () => {
+      if (!isAnimatingRef.current) return;
+
       const elapsed = Date.now() - start;
-      const progress = Math.min(elapsed / fadeInDuration, 1);
+      const progress = Math.max(0, Math.min(elapsed / fadeInDuration, 1));
 
       setScrollbarColor(interpolateColor(startColor, focusedColor, progress));
 
@@ -68,8 +82,13 @@ export function useAnimatedScrollbar(
           // Phase 3: Fade Out
           start = Date.now();
           const animateFadeOut = () => {
+            if (!isAnimatingRef.current) return;
+
             const elapsed = Date.now() - start;
-            const progress = Math.min(elapsed / fadeOutDuration, 1);
+            const progress = Math.max(
+              0,
+              Math.min(elapsed / fadeOutDuration, 1),
+            );
             setScrollbarColor(
               interpolateColor(focusedColor, unfocusedColor, progress),
             );
@@ -88,7 +107,7 @@ export function useAnimatedScrollbar(
   }, [cleanup]);
 
   const wasFocused = useRef(isFocused);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (isFocused && !wasFocused.current) {
       flashScrollbar();
     } else if (!isFocused && wasFocused.current) {

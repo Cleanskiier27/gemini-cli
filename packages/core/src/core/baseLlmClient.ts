@@ -6,20 +6,35 @@
 
 import type {
   Content,
-  GenerateContentConfig,
   Part,
   EmbedContentParameters,
   GenerateContentResponse,
+  GenerateContentParameters,
+  GenerateContentConfig,
 } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { ContentGenerator } from './contentGenerator.js';
+import type { ContentGenerator, AuthType } from './contentGenerator.js';
+import { handleFallback } from '../fallback/handler.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { logMalformedJsonResponse } from '../telemetry/loggers.js';
-import { MalformedJsonResponseEvent } from '../telemetry/types.js';
-import { retryWithBackoff } from '../utils/retry.js';
+import {
+  logMalformedJsonResponse,
+  logNetworkRetryAttempt,
+} from '../telemetry/loggers.js';
+import {
+  MalformedJsonResponseEvent,
+  LlmRole,
+  NetworkRetryAttemptEvent,
+} from '../telemetry/types.js';
+import { retryWithBackoff, getRetryErrorType } from '../utils/retry.js';
+import { coreEvents } from '../utils/events.js';
+import { getDisplayString } from '../config/models.js';
 import type { ModelConfigKey } from '../services/modelConfigService.js';
+import {
+  applyModelSelection,
+  createAvailabilityContextProvider,
+} from '../availability/policyHelpers.js';
 
 const DEFAULT_MAX_ATTEMPTS = 5;
 
@@ -45,9 +60,61 @@ export interface GenerateJsonOptions {
    */
   promptId: string;
   /**
+   * The role of the LLM call.
+   */
+  role: LlmRole;
+  /**
    * The maximum number of attempts for the request.
    */
   maxAttempts?: number;
+}
+
+/**
+ * Options for the generateContent utility function.
+ */
+export interface GenerateContentOptions {
+  /** The desired model config. */
+  modelConfigKey: ModelConfigKey;
+  /** The input prompt or history. */
+  contents: Content[];
+  /**
+   * Task-specific system instructions.
+   * If omitted, no system instruction is sent.
+   */
+  systemInstruction?: string | Part | Part[] | Content;
+  /** Signal for cancellation. */
+  abortSignal: AbortSignal;
+  /**
+   * A unique ID for the prompt, used for logging/telemetry correlation.
+   */
+  promptId: string;
+  /**
+   * The role of the LLM call.
+   */
+  role: LlmRole;
+  /**
+   * The maximum number of attempts for the request.
+   */
+  maxAttempts?: number;
+}
+
+interface _CommonGenerateOptions {
+  modelConfigKey: ModelConfigKey;
+  contents: Content[];
+  systemInstruction?: string | Part | Part[] | Content;
+  abortSignal: AbortSignal;
+  promptId: string;
+  maxAttempts?: number;
+  additionalProperties?: {
+    responseJsonSchema: Record<string, unknown>;
+    responseMimeType: string;
+  };
+}
+
+export interface CountTokenOptions {
+  modelConfigKey?: ModelConfigKey;
+  contents: Content[];
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -57,93 +124,68 @@ export class BaseLlmClient {
   constructor(
     private readonly contentGenerator: ContentGenerator,
     private readonly config: Config,
+    private readonly authType?: AuthType,
   ) {}
 
   async generateJson(
     options: GenerateJsonOptions,
   ): Promise<Record<string, unknown>> {
     const {
+      schema,
       modelConfigKey,
       contents,
-      schema,
-      abortSignal,
       systemInstruction,
+      abortSignal,
       promptId,
+      role,
       maxAttempts,
     } = options;
 
-    const { model, generateContentConfig } =
+    const { model } =
       this.config.modelConfigService.getResolvedConfig(modelConfigKey);
-    const requestConfig: GenerateContentConfig = {
-      abortSignal,
-      ...generateContentConfig,
-      ...(systemInstruction && { systemInstruction }),
-      responseJsonSchema: schema,
-      responseMimeType: 'application/json',
+
+    const shouldRetryOnContent = (response: GenerateContentResponse) => {
+      const text = getResponseText(response)?.trim();
+      if (!text) {
+        return true; // Retry on empty response
+      }
+      try {
+        // We don't use the result, just check if it's valid JSON
+        JSON.parse(this.cleanJsonResponse(text, model));
+        return false; // It's valid, don't retry
+      } catch {
+        return true; // It's not valid, retry
+      }
     };
 
-    try {
-      const apiCall = () =>
-        this.contentGenerator.generateContent(
-          {
-            model,
-            config: requestConfig,
-            contents,
-          },
-          promptId,
-        );
+    const result = await this._generateWithRetry(
+      {
+        modelConfigKey,
+        contents,
+        abortSignal,
+        promptId,
+        maxAttempts,
+        systemInstruction,
+        additionalProperties: {
+          responseJsonSchema: schema,
+          responseMimeType: 'application/json',
+        },
+      },
+      shouldRetryOnContent,
+      'generateJson',
+      role,
+    );
 
-      const shouldRetryOnContent = (response: GenerateContentResponse) => {
-        const text = getResponseText(response)?.trim();
-        if (!text) {
-          return true; // Retry on empty response
-        }
-        try {
-          JSON.parse(this.cleanJsonResponse(text, model));
-          return false;
-        } catch (_e) {
-          return true;
-        }
-      };
-
-      const result = await retryWithBackoff(apiCall, {
-        shouldRetryOnContent,
-        maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
-      });
-
-      // If we are here, the content is valid (not empty and parsable).
-      return JSON.parse(
-        this.cleanJsonResponse(getResponseText(result)!.trim(), model),
-      );
-    } catch (error) {
-      if (abortSignal.aborted) {
-        throw error;
-      }
-
-      // Check if the error is from exhausting retries, and report accordingly.
-      if (
-        error instanceof Error &&
-        error.message.includes('Retry attempts exhausted')
-      ) {
-        await reportError(
-          error,
-          'API returned invalid content (empty or unparsable JSON) after all retries.',
-          contents,
-          'generateJson-invalid-content',
-        );
-      } else {
-        await reportError(
-          error,
-          'Error generating JSON content via API.',
-          contents,
-          'generateJson-api',
-        );
-      }
-
-      throw new Error(
-        `Failed to generate JSON content: ${getErrorMessage(error)}`,
-      );
+    // If we are here, the content is valid (not empty and parsable).
+    const parsed: unknown = JSON.parse(
+      this.cleanJsonResponse(getResponseText(result)!.trim(), model),
+    );
+    const isRecord = (val: unknown): val is Record<string, unknown> =>
+      typeof val === 'object' && val !== null && !Array.isArray(val);
+    if (isRecord(parsed)) {
+      return parsed;
     }
+    throw new Error('Invalid JSON response format from LLM');
   }
 
   async generateEmbedding(texts: string[]): Promise<number[][]> {
@@ -192,5 +234,191 @@ export class BaseLlmClient {
       return text.substring(prefix.length, text.length - suffix.length).trim();
     }
     return text;
+  }
+
+  async countTokens(
+    options: CountTokenOptions,
+  ): Promise<{ totalTokens: number }> {
+    const model = options.modelConfigKey
+      ? this.config.modelConfigService.getResolvedConfig(options.modelConfigKey)
+          .model
+      : this.config.getActiveModel();
+    const result = await this.contentGenerator.countTokens({
+      model,
+      contents: options.contents,
+      config: options.abortSignal
+        ? { abortSignal: options.abortSignal }
+        : undefined,
+    });
+    return { totalTokens: result.totalTokens || 0 };
+  }
+
+  async generateContent(
+    options: GenerateContentOptions,
+  ): Promise<GenerateContentResponse> {
+    const {
+      modelConfigKey,
+      contents,
+      systemInstruction,
+      abortSignal,
+      promptId,
+      role,
+      maxAttempts,
+    } = options;
+
+    const shouldRetryOnContent = (response: GenerateContentResponse) => {
+      const text = getResponseText(response)?.trim();
+      return !text; // Retry on empty response
+    };
+
+    return this._generateWithRetry(
+      {
+        modelConfigKey,
+        contents,
+        systemInstruction,
+        abortSignal,
+        promptId,
+        maxAttempts,
+      },
+      shouldRetryOnContent,
+      'generateContent',
+      role,
+    );
+  }
+
+  private async _generateWithRetry(
+    options: _CommonGenerateOptions,
+    shouldRetryOnContent: (response: GenerateContentResponse) => boolean,
+    errorContext: 'generateJson' | 'generateContent',
+    role: LlmRole = LlmRole.UTILITY_TOOL,
+  ): Promise<GenerateContentResponse> {
+    const {
+      modelConfigKey,
+      contents,
+      systemInstruction,
+      abortSignal,
+      promptId,
+      maxAttempts,
+      additionalProperties,
+    } = options;
+
+    const {
+      model,
+      config: generateContentConfig,
+      maxAttempts: availabilityMaxAttempts,
+    } = applyModelSelection(this.config, modelConfigKey);
+
+    let currentModel = model;
+    let currentGenerateContentConfig = generateContentConfig;
+
+    // Define callback to fetch context dynamically since active model may get updated during retry loop
+    const getAvailabilityContext = createAvailabilityContextProvider(
+      this.config,
+      () => currentModel,
+    );
+
+    let initialActiveModel = this.config.getActiveModel();
+
+    try {
+      const apiCall = () => {
+        // Ensure we use the current active model
+        // in case a fallback occurred in a previous attempt.
+        const activeModel = this.config.getActiveModel();
+        if (activeModel !== initialActiveModel) {
+          initialActiveModel = activeModel;
+          // Re-resolve config if model changed during retry
+          const { model: resolvedModel, generateContentConfig } =
+            this.config.modelConfigService.getResolvedConfig({
+              ...modelConfigKey,
+              model: activeModel,
+            });
+          currentModel = resolvedModel;
+          currentGenerateContentConfig = generateContentConfig;
+        }
+        const finalConfig: GenerateContentConfig = {
+          ...currentGenerateContentConfig,
+          ...(systemInstruction && { systemInstruction }),
+          ...additionalProperties,
+          abortSignal,
+        };
+        const requestParams: GenerateContentParameters = {
+          model: currentModel,
+          config: finalConfig,
+          contents,
+        };
+        return this.contentGenerator.generateContent(
+          requestParams,
+          promptId,
+          role,
+        );
+      };
+
+      return await retryWithBackoff(apiCall, {
+        shouldRetryOnContent,
+        maxAttempts:
+          availabilityMaxAttempts ?? maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        getAvailabilityContext,
+        onPersistent429: this.config.isInteractive()
+          ? (authType, error) =>
+              handleFallback(this.config, currentModel, authType, error)
+          : undefined,
+        authType:
+          this.authType ?? this.config.getContentGeneratorConfig()?.authType,
+        retryFetchErrors: this.config.getRetryFetchErrors(),
+        onRetry: (attempt, error, delayMs) => {
+          const actualMaxAttempts =
+            getAvailabilityContext()?.policy.maxAttempts ??
+            maxAttempts ??
+            DEFAULT_MAX_ATTEMPTS;
+          const modelName = getDisplayString(currentModel);
+          const errorType = getRetryErrorType(error);
+
+          coreEvents.emitRetryAttempt({
+            attempt,
+            maxAttempts: actualMaxAttempts,
+            delayMs,
+            error: errorType,
+            model: modelName,
+          });
+
+          logNetworkRetryAttempt(
+            this.config,
+            new NetworkRetryAttemptEvent(
+              attempt,
+              actualMaxAttempts,
+              errorType,
+              delayMs,
+              modelName,
+            ),
+          );
+        },
+      });
+    } catch (error) {
+      if (abortSignal?.aborted) {
+        throw error;
+      }
+
+      // Check if the error is from exhausting retries, and report accordingly.
+      if (
+        error instanceof Error &&
+        error.message.includes('Retry attempts exhausted')
+      ) {
+        await reportError(
+          error,
+          `API returned invalid content after all retries.`,
+          contents,
+          `${errorContext}-invalid-content`,
+        );
+      } else {
+        await reportError(
+          error,
+          `Error generating content via API.`,
+          contents,
+          `${errorContext}-api`,
+        );
+      }
+
+      throw new Error(`Failed to generate content: ${getErrorMessage(error)}`);
+    }
   }
 }

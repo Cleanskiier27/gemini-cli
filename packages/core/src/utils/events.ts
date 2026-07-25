@@ -1,11 +1,20 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
 
 import { EventEmitter } from 'node:events';
-import type { LoadServerHierarchicalMemoryResponse } from './memoryDiscovery.js';
+import type { AgentDefinition } from '../agents/types.js';
+import type { McpClient } from '../tools/mcp-client.js';
+import type { ExtensionEvents } from './extensionLoader.js';
+import type { EditorType } from './editor.js';
+import type {
+  TokenStorageInitializationEvent,
+  KeychainAvailabilityEvent,
+} from '../telemetry/types.js';
+import { debugLogger } from './debugLogger.js';
+import type { ApprovalMode } from '../policy/types.js';
 
 /**
  * Defines the severity level for user-facing feedback.
@@ -35,16 +44,6 @@ export interface UserFeedbackPayload {
 }
 
 /**
- * Payload for the 'fallback-mode-changed' event.
- */
-export interface FallbackModeChangedPayload {
-  /**
-   * Whether fallback mode is now active.
-   */
-  isInFallbackMode: boolean;
-}
-
-/**
  * Payload for the 'model-changed' event.
  */
 export interface ModelChangedPayload {
@@ -55,30 +54,250 @@ export interface ModelChangedPayload {
 }
 
 /**
+ * Payload for the 'approval-mode-changed' event.
+ */
+export interface ApprovalModeChangedPayload {
+  /**
+   * The session ID associated with the mode change.
+   */
+  sessionId: string;
+  /**
+   * The new approval mode.
+   */
+  mode: ApprovalMode;
+}
+
+/**
+ * Payload for the 'console-log' event.
+ */
+export interface ConsoleLogPayload {
+  type: 'log' | 'warn' | 'error' | 'debug' | 'info';
+  content: string;
+}
+
+/**
+ * Payload for the 'output' event.
+ */
+export interface OutputPayload {
+  isStderr: boolean;
+  chunk: Uint8Array | string;
+  encoding?: BufferEncoding;
+}
+
+/**
  * Payload for the 'memory-changed' event.
  */
-export type MemoryChangedPayload = LoadServerHierarchicalMemoryResponse;
+export interface MemoryChangedPayload {
+  fileCount: number;
+}
+
+/**
+ * Base payload for hook-related events.
+ */
+export interface HookPayload {
+  hookName: string;
+  eventName: string;
+}
+
+/**
+ * Payload for the 'hook-start' event.
+ */
+export interface HookStartPayload extends HookPayload {
+  /**
+   * The source of the hook configuration.
+   */
+  source?: string;
+  /**
+   * The 1-based index of the current hook in the execution sequence.
+   */
+  hookIndex?: number;
+  /**
+   * The total number of hooks in the current execution sequence.
+   */
+  totalHooks?: number;
+}
+
+/**
+ * Payload for the 'hook-end' event.
+ */
+export interface HookEndPayload extends HookPayload {
+  success: boolean;
+}
+
+/**
+ * Payload for the 'hook-system-message' event.
+ */
+export interface HookSystemMessagePayload extends HookPayload {
+  message: string;
+}
+
+/**
+ * Payload for the 'retry-attempt' event.
+ */
+export interface RetryAttemptPayload {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  error?: string;
+  model: string;
+}
+
+/**
+ * Payload for the 'consent-request' event.
+ */
+export interface ConsentRequestPayload {
+  prompt: string;
+  onConfirm: (confirmed: boolean) => void;
+}
+
+/**
+ * Payload for the 'mcp-progress' event.
+ */
+export interface McpProgressPayload {
+  serverName: string;
+  callId: string;
+  progressToken: string | number;
+  progress: number;
+  total?: number;
+  message?: string;
+}
+
+/**
+ * Payload for the 'agents-discovered' event.
+ */
+export interface AgentsDiscoveredPayload {
+  agents: AgentDefinition[];
+}
+
+export interface SlashCommandConflict {
+  name: string;
+  renamedTo: string;
+  loserExtensionName?: string;
+  winnerExtensionName?: string;
+  loserMcpServerName?: string;
+  winnerMcpServerName?: string;
+  loserKind?: string;
+  winnerKind?: string;
+}
+
+export interface SlashCommandConflictsPayload {
+  conflicts: SlashCommandConflict[];
+}
+
+/**
+ * Payload for the 'quota-changed' event.
+ */
+export interface QuotaChangedPayload {
+  remaining: number | undefined;
+  limit: number | undefined;
+  resetTime?: string;
+}
 
 export enum CoreEvent {
   UserFeedback = 'user-feedback',
-  FallbackModeChanged = 'fallback-mode-changed',
   ModelChanged = 'model-changed',
+  ApprovalModeChanged = 'approval-mode-changed',
+  ConsoleLog = 'console-log',
+  Output = 'output',
   MemoryChanged = 'memory-changed',
+  ExternalEditorClosed = 'external-editor-closed',
+  McpClientUpdate = 'mcp-client-update',
+  OauthDisplayMessage = 'oauth-display-message',
+  SettingsChanged = 'settings-changed',
+  HookStart = 'hook-start',
+  HookEnd = 'hook-end',
+  HookSystemMessage = 'hook-system-message',
+  AgentsRefreshed = 'agents-refreshed',
+  AdminSettingsChanged = 'admin-settings-changed',
+  RetryAttempt = 'retry-attempt',
+  ConsentRequest = 'consent-request',
+  McpProgress = 'mcp-progress',
+  AgentsDiscovered = 'agents-discovered',
+  RequestEditorSelection = 'request-editor-selection',
+  EditorSelected = 'editor-selected',
+  SlashCommandConflicts = 'slash-command-conflicts',
+  QuotaChanged = 'quota-changed',
+  TelemetryKeychainAvailability = 'telemetry-keychain-availability',
+  TelemetryTokenStorageType = 'telemetry-token-storage-type',
 }
 
-export interface CoreEvents {
-  [CoreEvent.UserFeedback]: [UserFeedbackPayload];
-  [CoreEvent.FallbackModeChanged]: [FallbackModeChangedPayload];
-  [CoreEvent.ModelChanged]: [ModelChangedPayload];
-  [CoreEvent.MemoryChanged]: [MemoryChangedPayload];
+/**
+ * Payload for the 'editor-selected' event.
+ */
+export interface EditorSelectedPayload {
+  editor?: EditorType;
 }
+
+export interface CoreEvents extends ExtensionEvents {
+  [CoreEvent.UserFeedback]: [UserFeedbackPayload];
+  [CoreEvent.ModelChanged]: [ModelChangedPayload];
+  [CoreEvent.ApprovalModeChanged]: [ApprovalModeChangedPayload];
+  [CoreEvent.ConsoleLog]: [ConsoleLogPayload];
+  [CoreEvent.Output]: [OutputPayload];
+  [CoreEvent.MemoryChanged]: [MemoryChangedPayload];
+  [CoreEvent.QuotaChanged]: [QuotaChangedPayload];
+  [CoreEvent.ExternalEditorClosed]: never[];
+  [CoreEvent.McpClientUpdate]: Array<Map<string, McpClient> | never>;
+  [CoreEvent.OauthDisplayMessage]: string[];
+  [CoreEvent.SettingsChanged]: never[];
+  [CoreEvent.HookStart]: [HookStartPayload];
+  [CoreEvent.HookEnd]: [HookEndPayload];
+  [CoreEvent.HookSystemMessage]: [HookSystemMessagePayload];
+  [CoreEvent.AgentsRefreshed]: never[];
+  [CoreEvent.AdminSettingsChanged]: never[];
+  [CoreEvent.RetryAttempt]: [RetryAttemptPayload];
+  [CoreEvent.ConsentRequest]: [ConsentRequestPayload];
+  [CoreEvent.McpProgress]: [McpProgressPayload];
+  [CoreEvent.AgentsDiscovered]: [AgentsDiscoveredPayload];
+  [CoreEvent.RequestEditorSelection]: never[];
+  [CoreEvent.EditorSelected]: [EditorSelectedPayload];
+  [CoreEvent.SlashCommandConflicts]: [SlashCommandConflictsPayload];
+  [CoreEvent.TelemetryKeychainAvailability]: [KeychainAvailabilityEvent];
+  [CoreEvent.TelemetryTokenStorageType]: [TokenStorageInitializationEvent];
+}
+
+type EventBacklogItem = {
+  [K in keyof CoreEvents]: {
+    event: K;
+    args: CoreEvents[K];
+  };
+}[keyof CoreEvents];
 
 export class CoreEventEmitter extends EventEmitter<CoreEvents> {
-  private _feedbackBacklog: UserFeedbackPayload[] = [];
+  private _eventBacklog: EventBacklogItem[] = [];
+  private _backlogHead = 0;
   private static readonly MAX_BACKLOG_SIZE = 10000;
 
   constructor() {
     super();
+  }
+
+  private _emitOrQueue<K extends keyof CoreEvents>(
+    event: K,
+    ...args: CoreEvents[K]
+  ): void {
+    if (this.listenerCount(event) === 0) {
+      const backlogSize = this._eventBacklog.length - this._backlogHead;
+      if (backlogSize >= CoreEventEmitter.MAX_BACKLOG_SIZE) {
+        // Evict oldest entry. Use a head pointer instead of shift() to avoid
+        // O(n) array reindexing on every eviction at capacity.
+        (this._eventBacklog as unknown[])[this._backlogHead] = undefined;
+        this._backlogHead++;
+        // Compact once dead entries exceed half capacity to bound memory
+        if (this._backlogHead >= CoreEventEmitter.MAX_BACKLOG_SIZE / 2) {
+          this._eventBacklog = this._eventBacklog.slice(this._backlogHead);
+          this._backlogHead = 0;
+        }
+      }
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      this._eventBacklog.push({ event, args } as EventBacklogItem);
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      (this.emit as (event: K, ...args: CoreEvents[K]) => boolean)(
+        event,
+        ...args,
+      );
+    }
   }
 
   /**
@@ -91,24 +310,30 @@ export class CoreEventEmitter extends EventEmitter<CoreEvents> {
     error?: unknown,
   ): void {
     const payload: UserFeedbackPayload = { severity, message, error };
-
-    if (this.listenerCount(CoreEvent.UserFeedback) === 0) {
-      if (this._feedbackBacklog.length >= CoreEventEmitter.MAX_BACKLOG_SIZE) {
-        this._feedbackBacklog.shift();
-      }
-      this._feedbackBacklog.push(payload);
-    } else {
-      this.emit(CoreEvent.UserFeedback, payload);
-    }
+    this._emitOrQueue(CoreEvent.UserFeedback, payload);
   }
 
   /**
-   * Notifies subscribers that fallback mode has changed.
-   * This is synchronous and doesn't use backlog (UI should already be initialized).
+   * Broadcasts a console log message.
    */
-  emitFallbackModeChanged(isInFallbackMode: boolean): void {
-    const payload: FallbackModeChangedPayload = { isInFallbackMode };
-    this.emit(CoreEvent.FallbackModeChanged, payload);
+  emitConsoleLog(
+    type: 'log' | 'warn' | 'error' | 'debug' | 'info',
+    content: string,
+  ): void {
+    const payload: ConsoleLogPayload = { type, content };
+    this._emitOrQueue(CoreEvent.ConsoleLog, payload);
+  }
+
+  /**
+   * Broadcasts stdout/stderr output.
+   */
+  emitOutput(
+    isStderr: boolean,
+    chunk: Uint8Array | string,
+    encoding?: BufferEncoding,
+  ): void {
+    const payload: OutputPayload = { isStderr, chunk, encoding };
+    this._emitOrQueue(CoreEvent.Output, payload);
   }
 
   /**
@@ -120,15 +345,149 @@ export class CoreEventEmitter extends EventEmitter<CoreEvents> {
   }
 
   /**
+   * Notifies subscribers that the approval mode has changed.
+   */
+  emitApprovalModeChanged(sessionId: string, mode: ApprovalMode): void {
+    const payload: ApprovalModeChangedPayload = { sessionId, mode };
+    this.emit(CoreEvent.ApprovalModeChanged, payload);
+  }
+
+  /**
+   * Notifies subscribers that settings have been modified.
+   */
+  emitSettingsChanged(): void {
+    this.emit(CoreEvent.SettingsChanged);
+  }
+
+  /**
+   * Notifies subscribers that a hook execution has started.
+   */
+  emitHookStart(payload: HookStartPayload): void {
+    this.emit(CoreEvent.HookStart, payload);
+  }
+
+  /**
+   * Notifies subscribers that a hook execution has ended.
+   */
+  emitHookEnd(payload: HookEndPayload): void {
+    this.emit(CoreEvent.HookEnd, payload);
+  }
+
+  /**
+   * Notifies subscribers that a hook has provided a system message.
+   */
+  emitHookSystemMessage(payload: HookSystemMessagePayload): void {
+    this.emit(CoreEvent.HookSystemMessage, payload);
+  }
+
+  /**
+   * Notifies subscribers that agents have been refreshed.
+   */
+  emitAgentsRefreshed(): void {
+    this.emit(CoreEvent.AgentsRefreshed);
+  }
+
+  /**
+   * Notifies subscribers that admin settings have changed.
+   */
+  emitAdminSettingsChanged(): void {
+    this.emit(CoreEvent.AdminSettingsChanged);
+  }
+
+  /**
+   * Notifies subscribers that a retry attempt is happening.
+   */
+  emitRetryAttempt(payload: RetryAttemptPayload): void {
+    this.emit(CoreEvent.RetryAttempt, payload);
+  }
+
+  /**
+   * Requests consent from the user via the UI.
+   */
+  emitConsentRequest(payload: ConsentRequestPayload): void {
+    this._emitOrQueue(CoreEvent.ConsentRequest, payload);
+  }
+
+  /**
+   * Notifies subscribers that progress has been made on an MCP tool call.
+   */
+  emitMcpProgress(payload: McpProgressPayload): void {
+    if (!Number.isFinite(payload.progress) || payload.progress < 0) {
+      debugLogger.log(`Invalid progress value: ${payload.progress}`);
+      return;
+    }
+    this.emit(CoreEvent.McpProgress, payload);
+  }
+
+  /**
+   * Notifies subscribers that new unacknowledged agents have been discovered.
+   */
+  emitAgentsDiscovered(agents: AgentDefinition[]): void {
+    const payload: AgentsDiscoveredPayload = { agents };
+    this._emitOrQueue(CoreEvent.AgentsDiscovered, payload);
+  }
+
+  emitSlashCommandConflicts(conflicts: SlashCommandConflict[]): void {
+    const payload: SlashCommandConflictsPayload = { conflicts };
+    this._emitOrQueue(CoreEvent.SlashCommandConflicts, payload);
+  }
+
+  /**
+   * Notifies subscribers that the quota has changed.
+   */
+  emitQuotaChanged(
+    remaining: number | undefined,
+    limit: number | undefined,
+    resetTime?: string,
+  ): void {
+    const payload: QuotaChangedPayload = { remaining, limit, resetTime };
+    this.emit(CoreEvent.QuotaChanged, payload);
+  }
+
+  /**
    * Flushes buffered messages. Call this immediately after primary UI listener
    * subscribes.
+   *
+   * @param transform - Optional function to transform events before they are emitted.
    */
-  drainFeedbackBacklog(): void {
-    const backlog = [...this._feedbackBacklog];
-    this._feedbackBacklog.length = 0; // Clear in-place
-    for (const payload of backlog) {
-      this.emit(CoreEvent.UserFeedback, payload);
+  drainBacklogs(
+    transform?: <K extends keyof CoreEvents>(
+      event: K,
+      args: CoreEvents[K],
+    ) => { event: K; args: CoreEvents[K] } | undefined,
+  ): void {
+    const backlog = this._eventBacklog;
+    const head = this._backlogHead;
+    this._eventBacklog = [];
+    this._backlogHead = 0;
+    for (let i = head; i < backlog.length; i++) {
+      const item = backlog[i];
+      if (item === undefined) continue;
+
+      let eventToEmit = item.event;
+      let argsToEmit = item.args;
+
+      if (transform) {
+        const transformed = transform(item.event, item.args);
+        if (!transformed) continue;
+        eventToEmit = transformed.event;
+        argsToEmit = transformed.args;
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      (this.emit as (event: keyof CoreEvents, ...args: unknown[]) => boolean)(
+        eventToEmit,
+        ...argsToEmit,
+      );
     }
+  }
+
+  emitTelemetryKeychainAvailability(event: KeychainAvailabilityEvent): void {
+    this._emitOrQueue(CoreEvent.TelemetryKeychainAvailability, event);
+  }
+
+  emitTelemetryTokenStorageType(event: TokenStorageInitializationEvent): void {
+    this._emitOrQueue(CoreEvent.TelemetryTokenStorageType, event);
   }
 }
 

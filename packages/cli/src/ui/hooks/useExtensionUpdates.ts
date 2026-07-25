@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { debugLogger, type GeminiCLIExtension } from '@google/gemini-cli-core';
-import { getErrorMessage } from '../../utils/errors.js';
+import {
+  debugLogger,
+  checkExhaustive,
+  getErrorMessage,
+  type GeminiCLIExtension,
+} from '@google/gemini-cli-core';
 import {
   ExtensionUpdateState,
   extensionUpdatesReducer,
@@ -19,7 +23,6 @@ import {
   updateExtension,
 } from '../../config/extensions/update.js';
 import { type ExtensionUpdateInfo } from '../../config/extension.js';
-import { checkExhaustive } from '../../utils/checks.js';
 import type { ExtensionManager } from '../../config/extension-manager.js';
 
 type ConfirmationRequestWrapper = {
@@ -98,11 +101,13 @@ export const useExtensionUpdates = (
       return !currentState || currentState === ExtensionUpdateState.UNKNOWN;
     });
     if (extensionsToCheck.length === 0) return;
-    checkForAllExtensionUpdates(
+    void checkForAllExtensionUpdates(
       extensionsToCheck,
       extensionManager,
       dispatchExtensionStateUpdate,
-    );
+    ).catch((e) => {
+      debugLogger.warn(getErrorMessage(e));
+    });
   }, [
     extensions,
     extensionManager,
@@ -132,10 +137,9 @@ export const useExtensionUpdates = (
       }
     }
 
-    let extensionsWithUpdatesCount = 0;
     // We only notify if we have unprocessed extensions in the UPDATE_AVAILABLE
     // state.
-    let shouldNotifyOfUpdates = false;
+    const pendingUpdates = [];
     const updatePromises: Array<Promise<ExtensionUpdateInfo | undefined>> = [];
     for (const extension of extensions) {
       const currentState = extensionsUpdateState.extensionStatuses.get(
@@ -149,14 +153,13 @@ export const useExtensionUpdates = (
       }
       const shouldUpdate = shouldDoUpdate(extension);
       if (!shouldUpdate) {
-        extensionsWithUpdatesCount++;
         if (!currentState.notified) {
           // Mark as processed immediately to avoid re-triggering.
           dispatchExtensionStateUpdate({
             type: 'SET_NOTIFIED',
             payload: { name: extension.name, notified: true },
           });
-          shouldNotifyOfUpdates = true;
+          pendingUpdates.push(extension.name);
         }
       } else {
         const updatePromise = updateExtension(
@@ -189,22 +192,29 @@ export const useExtensionUpdates = (
           });
       }
     }
-    if (shouldNotifyOfUpdates) {
-      const s = extensionsWithUpdatesCount > 1 ? 's' : '';
+    if (pendingUpdates.length > 0) {
+      const s = pendingUpdates.length > 1 ? 's' : '';
       addItem(
         {
           type: MessageType.INFO,
-          text: `You have ${extensionsWithUpdatesCount} extension${s} with an update available, run "/extensions list" for more information.`,
+          text: `You have ${pendingUpdates.length} extension${s} with an update available. Run "/extensions update ${pendingUpdates.join(' ')}".`,
         },
         Date.now(),
       );
     }
     if (scheduledUpdate) {
-      Promise.all(updatePromises).then((results) => {
-        const nonNullResults = results.filter((result) => result != null);
+      void Promise.allSettled(updatePromises).then((results) => {
+        const successfulUpdates = results
+          .filter(
+            (r): r is PromiseFulfilledResult<ExtensionUpdateInfo | undefined> =>
+              r.status === 'fulfilled',
+          )
+          .map((r) => r.value)
+          .filter((v): v is ExtensionUpdateInfo => v !== undefined);
+
         scheduledUpdate.onCompleteCallbacks.forEach((callback) => {
           try {
-            callback(nonNullResults);
+            callback(successfulUpdates);
           } catch (e) {
             debugLogger.warn(getErrorMessage(e));
           }

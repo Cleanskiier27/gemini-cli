@@ -6,16 +6,13 @@
 
 import { z } from 'zod';
 import type { BaseLlmClient } from '../../core/baseLlmClient.js';
-import { promptIdContext } from '../../utils/promptIdContext.js';
+import { getPromptIdWithFallback } from '../../utils/promptIdContext.js';
 import type {
   RoutingContext,
   RoutingDecision,
   RoutingStrategy,
 } from '../routingStrategy.js';
-import {
-  DEFAULT_GEMINI_FLASH_MODEL,
-  DEFAULT_GEMINI_MODEL,
-} from '../../config/models.js';
+import { resolveClassifierModel, isGemini3Model } from '../../config/models.js';
 import { createUserContent, Type } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import {
@@ -23,6 +20,9 @@ import {
   isFunctionResponse,
 } from '../../utils/messageInspectors.js';
 import { debugLogger } from '../../utils/debugLogger.js';
+import { normalizeModelId } from '../../utils/modelUtils.js';
+import type { LocalLiteRtLmClient } from '../../core/localLiteRtLmClient.js';
+import { LlmRole } from '../../telemetry/types.js';
 
 // The number of recent history turns to provide to the router for context.
 const HISTORY_TURNS_FOR_CONTEXT = 4;
@@ -131,25 +131,36 @@ export class ClassifierStrategy implements RoutingStrategy {
 
   async route(
     context: RoutingContext,
-    _config: Config,
+    config: Config,
     baseLlmClient: BaseLlmClient,
+    _localLiteRtLmClient: LocalLiteRtLmClient,
   ): Promise<RoutingDecision | null> {
     const startTime = Date.now();
     try {
-      let promptId = promptIdContext.getStore();
-      if (!promptId) {
-        promptId = `classifier-router-fallback-${Date.now()}-${Math.random()
-          .toString(16)
-          .slice(2)}`;
-        debugLogger.warn(
-          `Could not find promptId in context. This is unexpected. Using a fallback ID: ${promptId}`,
-        );
+      const model = context.requestedModel ?? config.getModel();
+      if (
+        (await config.getNumericalRoutingEnabled()) &&
+        isGemini3Model(model, config)
+      ) {
+        return null;
       }
+
+      // TODO - Consider using function req/res if they help accuracy.
+      // Bypass the classifier if the request is a function response.
+      // Since we prune all tool turns from history, sending a function response
+      // request would result in an invalid payload (missing the preceding function call).
+      if (isFunctionResponse(createUserContent(context.request))) {
+        debugLogger.log(
+          '[Routing] Bypassing Classifier: request is FunctionResponse.',
+        );
+        return null;
+      }
+
+      const promptId = getPromptIdWithFallback('classifier-router');
 
       const historySlice = context.history.slice(-HISTORY_SEARCH_WINDOW);
 
       // Filter out tool-related turns.
-      // TODO - Consider using function req/res if they help accuracy.
       const cleanHistory = historySlice.filter(
         (content) => !isFunctionCall(content) && !isFunctionResponse(content),
       );
@@ -164,32 +175,48 @@ export class ClassifierStrategy implements RoutingStrategy {
         systemInstruction: CLASSIFIER_SYSTEM_PROMPT,
         abortSignal: context.signal,
         promptId,
+        role: LlmRole.UTILITY_ROUTER,
       });
 
       const routerResponse = ClassifierResponseSchema.parse(jsonResponse);
 
       const reasoning = routerResponse.reasoning;
       const latencyMs = Date.now() - startTime;
+      const [useGemini3_1, useCustomToolModel] = await Promise.all([
+        config.getGemini31Launched(),
+        config.getUseCustomToolModel(),
+      ]);
+      const useGemini3_5Flash = config.hasGemini35FlashGAAccess?.() ?? false;
+      const selectedModel = normalizeModelId(
+        resolveClassifierModel(
+          normalizeModelId(model),
+          routerResponse.model_choice,
+          useGemini3_1,
+          useCustomToolModel,
+          config.getHasAccessToPreviewModel?.() ?? true,
+          config,
+          useGemini3_5Flash,
+        ),
+      );
 
-      if (routerResponse.model_choice === FLASH_MODEL) {
-        return {
-          model: DEFAULT_GEMINI_FLASH_MODEL,
-          metadata: {
-            source: 'Classifier',
-            latencyMs,
-            reasoning,
-          },
-        };
-      } else {
-        return {
-          model: DEFAULT_GEMINI_MODEL,
-          metadata: {
-            source: 'Classifier',
-            reasoning,
-            latencyMs,
-          },
-        };
+      const service = config.getModelAvailabilityService();
+      const snapshot = service.snapshot(selectedModel);
+
+      if (!snapshot.available) {
+        debugLogger.warn(
+          `[Routing] Classifier selected unavailable model ${selectedModel} (${snapshot.reason}). Bypassing.`,
+        );
+        return null;
       }
+
+      return {
+        model: selectedModel,
+        metadata: {
+          source: 'Classifier',
+          latencyMs,
+          reasoning,
+        },
+      };
     } catch (error) {
       // If the classifier fails for any reason (API error, parsing error, etc.),
       // we log it and return null to allow the composite strategy to proceed.

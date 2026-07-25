@@ -4,14 +4,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { debugLogger } from '@google/gemini-cli-core';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { debugLogger, type SkillDefinition } from '@google/gemini-cli-core';
+import chalk from 'chalk';
 
 import type { ConfirmationRequest } from '../../ui/types.js';
 import { escapeAnsiCtrlCodes } from '../../ui/utils/textUtils.js';
 import type { ExtensionConfig } from '../extension.js';
 
-export const INSTALL_WARNING_MESSAGE =
-  '**The extension you are about to install may have been created by a third-party developer and sourced from a public repository. Google does not vet, endorse, or guarantee the functionality or security of extensions. Please carefully inspect any extension and its source code before installing to understand the permissions it requires and the actions it may perform.**';
+export const INSTALL_WARNING_MESSAGE = chalk.yellow(
+  'The extension you are about to install may have been created by a third-party developer and sourced from a public repository. Google does not vet, endorse, or guarantee the functionality or security of extensions. Please carefully inspect any extension and its source code before installing to understand the permissions it requires and the actions it may perform.',
+);
+
+export const SKILLS_WARNING_MESSAGE = chalk.yellow(
+  "Agent skills inject specialized instructions and domain-specific knowledge into the agent's system prompt. This can change how the agent interprets your requests and interacts with your environment. Review the skill definitions at the location(s) provided below to ensure they meet your security standards.",
+);
+
+/**
+ * Builds a consent string for installing agent skills.
+ */
+export async function skillsConsentString(
+  skills: SkillDefinition[],
+  source: string,
+  targetDir?: string,
+  isLink = false,
+): Promise<string> {
+  const action = isLink ? 'Linking' : 'Installing';
+  const output: string[] = [];
+  output.push(`${action} agent skill(s) from "${source}".`);
+  output.push(
+    `\nThe following agent skill(s) will be ${action.toLowerCase()}:\n`,
+  );
+  output.push(...(await renderSkillsList(skills)));
+
+  if (targetDir) {
+    const destLabel = isLink ? 'Link' : 'Install';
+    output.push(`${destLabel} Destination: ${targetDir}`);
+  }
+  output.push('\n' + SKILLS_WARNING_MESSAGE);
+
+  return output.join('\n');
+}
 
 /**
  * Requests consent from the user to perform an action, by reading a Y/n
@@ -38,16 +72,18 @@ export async function requestConsentNonInteractive(
  * This should not be called from non-interactive mode as it will not work.
  *
  * @param consentDescription The description of the thing they will be consenting to.
- * @param setExtensionUpdateConfirmationRequest A function to actually add a prompt to the UI.
+ * @param addExtensionUpdateConfirmationRequest A function to actually add a prompt to the UI.
  * @returns boolean, whether they consented or not.
  */
 export async function requestConsentInteractive(
   consentDescription: string,
   addExtensionUpdateConfirmationRequest: (value: ConfirmationRequest) => void,
+  clearConfirmationRequest?: () => void,
 ): Promise<boolean> {
-  return await promptForConsentInteractive(
+  return promptForConsentInteractive(
     consentDescription + '\n\nDo you want to continue?',
     addExtensionUpdateConfirmationRequest,
+    clearConfirmationRequest,
   );
 }
 
@@ -57,10 +93,12 @@ export async function requestConsentInteractive(
  * This should not be called from interactive mode as it will break the CLI.
  *
  * @param prompt A yes/no prompt to ask the user
- * @returns Whether or not the user answers 'y' (yes). Defaults to 'yes' on enter.
+ * @param defaultValue Whether to resolve as true or false on enter.
+ * @returns Whether or not the user answers 'y' (yes).
  */
-async function promptForConsentNonInteractive(
+export async function promptForConsentNonInteractive(
   prompt: string,
+  defaultValue = true,
 ): Promise<boolean> {
   const readline = await import('node:readline');
   const rl = readline.createInterface({
@@ -71,7 +109,12 @@ async function promptForConsentNonInteractive(
   return new Promise((resolve) => {
     rl.question(prompt, (answer) => {
       rl.close();
-      resolve(['y', ''].includes(answer.trim().toLowerCase()));
+      const trimmedAnswer = answer.trim().toLowerCase();
+      if (trimmedAnswer === '') {
+        resolve(defaultValue);
+      } else {
+        resolve(['y', 'yes'].includes(trimmedAnswer));
+      }
     });
   });
 }
@@ -82,18 +125,20 @@ async function promptForConsentNonInteractive(
  * This should not be called from non-interactive mode as it will break the CLI.
  *
  * @param prompt A markdown prompt to ask the user
- * @param setExtensionUpdateConfirmationRequest Function to update the UI state with the confirmation request.
+ * @param addExtensionUpdateConfirmationRequest Function to update the UI state with the confirmation request.
  * @returns Whether or not the user answers yes.
  */
 async function promptForConsentInteractive(
   prompt: string,
   addExtensionUpdateConfirmationRequest: (value: ConfirmationRequest) => void,
+  clearConfirmationRequest?: () => void,
 ): Promise<boolean> {
-  return await new Promise<boolean>((resolve) => {
+  return new Promise<boolean>((resolve) => {
     addExtensionUpdateConfirmationRequest({
       prompt,
       onConfirm: (resolvedConfirmed) => {
-        resolve(resolvedConfirmed);
+        clearConfirmationRequest?.();
+        setImmediate(() => resolve(resolvedConfirmed));
       },
     });
   });
@@ -103,12 +148,34 @@ async function promptForConsentInteractive(
  * Builds a consent string for installing an extension based on it's
  * extensionConfig.
  */
-function extensionConsentString(extensionConfig: ExtensionConfig): string {
+async function extensionConsentString(
+  extensionConfig: ExtensionConfig,
+  hasHooks: boolean,
+  skills: SkillDefinition[] = [],
+  previousName?: string,
+  wasMigrated?: boolean,
+): Promise<string> {
   const sanitizedConfig = escapeAnsiCtrlCodes(extensionConfig);
   const output: string[] = [];
   const mcpServerEntries = Object.entries(sanitizedConfig.mcpServers || {});
-  output.push(`Installing extension "${sanitizedConfig.name}".`);
-  output.push(INSTALL_WARNING_MESSAGE);
+
+  if (wasMigrated) {
+    if (previousName && previousName !== sanitizedConfig.name) {
+      output.push(
+        `Migrating extension "${previousName}" to a new repository, renaming to "${sanitizedConfig.name}", and installing updates.`,
+      );
+    } else {
+      output.push(
+        `Migrating extension "${sanitizedConfig.name}" to a new repository and installing updates.`,
+      );
+    }
+  } else if (previousName && previousName !== sanitizedConfig.name) {
+    output.push(
+      `Renaming extension "${previousName}" to "${sanitizedConfig.name}" and installing updates.`,
+    );
+  } else {
+    output.push(`Installing extension "${sanitizedConfig.name}".`);
+  }
 
   if (mcpServerEntries.length) {
     output.push('This extension will run the following MCP servers:');
@@ -130,7 +197,44 @@ function extensionConsentString(extensionConfig: ExtensionConfig): string {
       `This extension will exclude the following core tools: ${sanitizedConfig.excludeTools}`,
     );
   }
+  if (hasHooks) {
+    output.push(
+      '⚠️  This extension contains Hooks which can automatically execute commands.',
+    );
+  }
+  if (skills.length > 0) {
+    output.push(`\n${chalk.bold('Agent Skills:')}`);
+    output.push('\nThis extension will install the following agent skills:\n');
+    output.push(...(await renderSkillsList(skills)));
+  }
+
+  output.push('\n' + INSTALL_WARNING_MESSAGE);
+  if (skills.length > 0) {
+    output.push('\n' + SKILLS_WARNING_MESSAGE);
+  }
+
   return output.join('\n');
+}
+
+/**
+ * Shared logic for formatting a list of agent skills for a consent prompt.
+ */
+async function renderSkillsList(skills: SkillDefinition[]): Promise<string[]> {
+  const output: string[] = [];
+  for (const skill of skills) {
+    output.push(`  * ${chalk.bold(skill.name)}: ${skill.description}`);
+    const skillDir = path.dirname(skill.location);
+    let fileCountStr = '';
+    try {
+      const skillDirItems = await fs.readdir(skillDir);
+      fileCountStr = ` (${skillDirItems.length} items in directory)`;
+    } catch {
+      fileCountStr = ` ${chalk.red('⚠️ (Could not count items in directory)')}`;
+    }
+    output.push(chalk.dim(`    (Source: ${skill.location})${fileCountStr}`));
+    output.push('');
+  }
+  return output;
 }
 
 /**
@@ -145,12 +249,25 @@ function extensionConsentString(extensionConfig: ExtensionConfig): string {
 export async function maybeRequestConsentOrFail(
   extensionConfig: ExtensionConfig,
   requestConsent: (consent: string) => Promise<boolean>,
+  hasHooks: boolean,
   previousExtensionConfig?: ExtensionConfig,
+  previousHasHooks?: boolean,
+  skills: SkillDefinition[] = [],
+  previousSkills: SkillDefinition[] = [],
+  isMigrating: boolean = false,
 ) {
-  const extensionConsent = extensionConsentString(extensionConfig);
+  const extensionConsent = await extensionConsentString(
+    extensionConfig,
+    hasHooks,
+    skills,
+    previousExtensionConfig?.name,
+    isMigrating,
+  );
   if (previousExtensionConfig) {
-    const previousExtensionConsent = extensionConsentString(
+    const previousExtensionConsent = await extensionConsentString(
       previousExtensionConfig,
+      previousHasHooks ?? false,
+      previousSkills,
     );
     if (previousExtensionConsent === extensionConsent) {
       return;

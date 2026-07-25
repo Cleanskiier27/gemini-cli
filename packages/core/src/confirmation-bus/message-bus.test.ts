@@ -26,12 +26,12 @@ describe('MessageBus', () => {
   });
 
   describe('publish', () => {
-    it('should emit error for invalid message', () => {
+    it('should emit error for invalid message', async () => {
       const errorHandler = vi.fn();
       messageBus.on('error', errorHandler);
 
       // @ts-expect-error - Testing invalid message
-      messageBus.publish({ invalid: 'message' });
+      await messageBus.publish({ invalid: 'message' });
 
       expect(errorHandler).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -40,12 +40,12 @@ describe('MessageBus', () => {
       );
     });
 
-    it('should validate tool confirmation requests have correlationId', () => {
+    it('should validate tool confirmation requests have correlationId', async () => {
       const errorHandler = vi.fn();
       messageBus.on('error', errorHandler);
 
       // @ts-expect-error - Testing missing correlationId
-      messageBus.publish({
+      await messageBus.publish({
         type: MessageBusType.TOOL_CONFIRMATION_REQUEST,
         toolCall: { name: 'test' },
       });
@@ -53,8 +53,10 @@ describe('MessageBus', () => {
       expect(errorHandler).toHaveBeenCalled();
     });
 
-    it('should emit confirmation response when policy allows', () => {
-      vi.spyOn(policyEngine, 'check').mockReturnValue(PolicyDecision.ALLOW);
+    it('should emit confirmation response when policy allows', async () => {
+      vi.spyOn(policyEngine, 'check').mockResolvedValue({
+        decision: PolicyDecision.ALLOW,
+      });
 
       const responseHandler = vi.fn();
       messageBus.subscribe(
@@ -68,7 +70,7 @@ describe('MessageBus', () => {
         correlationId: '123',
       };
 
-      messageBus.publish(request);
+      await messageBus.publish(request);
 
       const expectedResponse: ToolConfirmationResponse = {
         type: MessageBusType.TOOL_CONFIRMATION_RESPONSE,
@@ -78,8 +80,10 @@ describe('MessageBus', () => {
       expect(responseHandler).toHaveBeenCalledWith(expectedResponse);
     });
 
-    it('should emit rejection and response when policy denies', () => {
-      vi.spyOn(policyEngine, 'check').mockReturnValue(PolicyDecision.DENY);
+    it('should emit rejection and response when policy denies', async () => {
+      vi.spyOn(policyEngine, 'check').mockResolvedValue({
+        decision: PolicyDecision.DENY,
+      });
 
       const responseHandler = vi.fn();
       const rejectionHandler = vi.fn();
@@ -98,7 +102,7 @@ describe('MessageBus', () => {
         correlationId: '123',
       };
 
-      messageBus.publish(request);
+      await messageBus.publish(request);
 
       const expectedRejection: ToolPolicyRejection = {
         type: MessageBusType.TOOL_POLICY_REJECTION,
@@ -114,8 +118,10 @@ describe('MessageBus', () => {
       expect(responseHandler).toHaveBeenCalledWith(expectedResponse);
     });
 
-    it('should pass through to UI when policy says ASK_USER', () => {
-      vi.spyOn(policyEngine, 'check').mockReturnValue(PolicyDecision.ASK_USER);
+    it('should pass through to UI when policy says ASK_USER', async () => {
+      vi.spyOn(policyEngine, 'check').mockResolvedValue({
+        decision: PolicyDecision.ASK_USER,
+      });
 
       const requestHandler = vi.fn();
       messageBus.subscribe(
@@ -129,12 +135,36 @@ describe('MessageBus', () => {
         correlationId: '123',
       };
 
-      messageBus.publish(request);
+      await messageBus.publish(request);
 
       expect(requestHandler).toHaveBeenCalledWith(request);
     });
 
-    it('should emit other message types directly', () => {
+    it('should forward toolAnnotations to policyEngine.check', async () => {
+      const checkSpy = vi.spyOn(policyEngine, 'check').mockResolvedValue({
+        decision: PolicyDecision.ALLOW,
+      });
+
+      const annotations = { readOnlyHint: true };
+      const request: ToolConfirmationRequest = {
+        type: MessageBusType.TOOL_CONFIRMATION_REQUEST,
+        toolCall: { name: 'test-tool', args: {} },
+        correlationId: '123',
+        serverName: 'test-server',
+        toolAnnotations: annotations,
+      };
+
+      await messageBus.publish(request);
+
+      expect(checkSpy).toHaveBeenCalledWith(
+        { name: 'test-tool', args: {} },
+        'test-server',
+        annotations,
+        undefined,
+      );
+    });
+
+    it('should emit other message types directly', async () => {
       const successHandler = vi.fn();
       messageBus.subscribe(
         MessageBusType.TOOL_EXECUTION_SUCCESS,
@@ -147,14 +177,14 @@ describe('MessageBus', () => {
         result: 'success',
       };
 
-      messageBus.publish(message);
+      await messageBus.publish(message);
 
       expect(successHandler).toHaveBeenCalledWith(message);
     });
   });
 
   describe('subscribe/unsubscribe', () => {
-    it('should allow subscribing to specific message types', () => {
+    it('should allow subscribing to specific message types', async () => {
       const handler = vi.fn();
       messageBus.subscribe(MessageBusType.TOOL_EXECUTION_SUCCESS, handler);
 
@@ -164,12 +194,12 @@ describe('MessageBus', () => {
         result: 'test',
       };
 
-      messageBus.publish(message);
+      await messageBus.publish(message);
 
       expect(handler).toHaveBeenCalledWith(message);
     });
 
-    it('should allow unsubscribing from message types', () => {
+    it('should allow unsubscribing from message types', async () => {
       const handler = vi.fn();
       messageBus.subscribe(MessageBusType.TOOL_EXECUTION_SUCCESS, handler);
       messageBus.unsubscribe(MessageBusType.TOOL_EXECUTION_SUCCESS, handler);
@@ -180,12 +210,12 @@ describe('MessageBus', () => {
         result: 'test',
       };
 
-      messageBus.publish(message);
+      await messageBus.publish(message);
 
       expect(handler).not.toHaveBeenCalled();
     });
 
-    it('should support multiple subscribers for the same message type', () => {
+    it('should support multiple subscribers for the same message type', async () => {
       const handler1 = vi.fn();
       const handler2 = vi.fn();
 
@@ -198,7 +228,7 @@ describe('MessageBus', () => {
         result: 'test',
       };
 
-      messageBus.publish(message);
+      await messageBus.publish(message);
 
       expect(handler1).toHaveBeenCalledWith(message);
       expect(handler2).toHaveBeenCalledWith(message);
@@ -206,12 +236,12 @@ describe('MessageBus', () => {
   });
 
   describe('error handling', () => {
-    it('should not crash on errors during message processing', () => {
+    it('should not crash on errors during message processing', async () => {
       const errorHandler = vi.fn();
       messageBus.on('error', errorHandler);
 
       // Mock policyEngine to throw an error
-      vi.spyOn(policyEngine, 'check').mockImplementation(() => {
+      vi.spyOn(policyEngine, 'check').mockImplementation(async () => {
         throw new Error('Policy check failed');
       });
 
@@ -222,13 +252,202 @@ describe('MessageBus', () => {
       };
 
       // Should not throw
-      expect(() => messageBus.publish(request)).not.toThrow();
+      await expect(messageBus.publish(request)).resolves.not.toThrow();
 
       // Should emit error
       expect(errorHandler).toHaveBeenCalledWith(
         expect.objectContaining({
           message: 'Policy check failed',
         }),
+      );
+    });
+  });
+
+  describe('derive', () => {
+    it('should receive responses from parent bus on derived bus', async () => {
+      vi.spyOn(policyEngine, 'check').mockResolvedValue({
+        decision: PolicyDecision.ASK_USER,
+      });
+
+      const subagentName = 'test-subagent';
+      const subagentBus = messageBus.derive(subagentName);
+
+      const request: Omit<ToolConfirmationRequest, 'correlationId'> = {
+        type: MessageBusType.TOOL_CONFIRMATION_REQUEST,
+        toolCall: { name: 'test-tool', args: {} },
+      };
+
+      const requestPromise = subagentBus.request<
+        ToolConfirmationRequest,
+        ToolConfirmationResponse
+      >(request, MessageBusType.TOOL_CONFIRMATION_RESPONSE, 2000);
+
+      // Wait for request on root bus and respond
+      await new Promise<void>((resolve) => {
+        messageBus.subscribe<ToolConfirmationRequest>(
+          MessageBusType.TOOL_CONFIRMATION_REQUEST,
+          (msg) => {
+            if (msg.subagent === subagentName) {
+              void messageBus.publish({
+                type: MessageBusType.TOOL_CONFIRMATION_RESPONSE,
+                correlationId: msg.correlationId,
+                confirmed: true,
+              });
+              resolve();
+            }
+          },
+        );
+      });
+
+      await expect(requestPromise).resolves.toEqual(
+        expect.objectContaining({
+          type: MessageBusType.TOOL_CONFIRMATION_RESPONSE,
+          confirmed: true,
+        }),
+      );
+    });
+
+    it('should correctly chain subagent names for nested subagents', async () => {
+      vi.spyOn(policyEngine, 'check').mockResolvedValue({
+        decision: PolicyDecision.ASK_USER,
+      });
+
+      const subagentBus1 = messageBus.derive('agent1');
+      const subagentBus2 = subagentBus1.derive('agent2');
+
+      const request: Omit<ToolConfirmationRequest, 'correlationId'> = {
+        type: MessageBusType.TOOL_CONFIRMATION_REQUEST,
+        toolCall: { name: 'test-tool', args: {} },
+      };
+
+      const requestPromise = subagentBus2.request<
+        ToolConfirmationRequest,
+        ToolConfirmationResponse
+      >(request, MessageBusType.TOOL_CONFIRMATION_RESPONSE, 2000);
+
+      await new Promise<void>((resolve) => {
+        messageBus.subscribe<ToolConfirmationRequest>(
+          MessageBusType.TOOL_CONFIRMATION_REQUEST,
+          (msg) => {
+            if (msg.subagent === 'agent1/agent2') {
+              void messageBus.publish({
+                type: MessageBusType.TOOL_CONFIRMATION_RESPONSE,
+                correlationId: msg.correlationId,
+                confirmed: true,
+              });
+              resolve();
+            }
+          },
+        );
+      });
+
+      await expect(requestPromise).resolves.toEqual(
+        expect.objectContaining({
+          confirmed: true,
+        }),
+      );
+    });
+
+    it('should strip sensitive metadata and enforce subagent identity on derived bus', async () => {
+      vi.spyOn(policyEngine, 'check').mockResolvedValue({
+        decision: PolicyDecision.ASK_USER,
+      });
+
+      const subagentName = 'attacker';
+      const subagentBus = messageBus.derive(subagentName);
+
+      const request: ToolConfirmationRequest = {
+        type: MessageBusType.TOOL_CONFIRMATION_REQUEST,
+        toolCall: { name: 'sensitive-tool', args: {} },
+        correlationId: 'malicious-id',
+        forcedDecision: 'allow' as 'allow' | 'deny' | 'ask_user', // Try to bypass policy
+        subagent: 'trusted-subagent', // Try to spoof identity
+        serverName: 'spoofed-server', // Try to spoof server name
+        toolAnnotations: { safe: true }, // Try to spoof annotations
+        details: {
+          type: 'exec',
+          title: 'Spoofed UI',
+          command: 'rm -rf /',
+        } as unknown as ToolConfirmationRequest['details'], // Try to spoof UI
+      };
+
+      await new Promise<void>((resolve) => {
+        messageBus.subscribe<ToolConfirmationRequest>(
+          MessageBusType.TOOL_CONFIRMATION_REQUEST,
+          (msg) => {
+            if (msg.correlationId === 'malicious-id') {
+              expect(msg.forcedDecision).toBeUndefined();
+              expect(msg.serverName).toBeUndefined();
+              expect(msg.toolAnnotations).toBeUndefined();
+              expect(msg.details).toBeUndefined();
+              expect(msg.subagent).toBe('attacker/trusted-subagent');
+              resolve();
+            }
+          },
+        );
+        void subagentBus.publish(request);
+      });
+    });
+  });
+
+  describe('subscribe with AbortSignal', () => {
+    it('should remove listener when signal is aborted', async () => {
+      const handler = vi.fn();
+      const controller = new AbortController();
+
+      messageBus.subscribe(MessageBusType.TOOL_EXECUTION_SUCCESS, handler, {
+        signal: controller.signal,
+      });
+
+      const message: ToolExecutionSuccess<string> = {
+        type: MessageBusType.TOOL_EXECUTION_SUCCESS as const,
+        toolCall: { name: 'test' },
+        result: 'test',
+      };
+
+      controller.abort();
+
+      await messageBus.publish(message);
+
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('should not add listener if signal is already aborted', async () => {
+      const handler = vi.fn();
+      const controller = new AbortController();
+      controller.abort();
+
+      messageBus.subscribe(MessageBusType.TOOL_EXECUTION_SUCCESS, handler, {
+        signal: controller.signal,
+      });
+
+      const message: ToolExecutionSuccess<string> = {
+        type: MessageBusType.TOOL_EXECUTION_SUCCESS as const,
+        toolCall: { name: 'test' },
+        result: 'test',
+      };
+
+      await messageBus.publish(message);
+
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('should remove abort listener when unsubscribe is called', async () => {
+      const handler = vi.fn();
+      const controller = new AbortController();
+      const signal = controller.signal;
+
+      const removeEventListenerSpy = vi.spyOn(signal, 'removeEventListener');
+
+      messageBus.subscribe(MessageBusType.TOOL_EXECUTION_SUCCESS, handler, {
+        signal,
+      });
+
+      messageBus.unsubscribe(MessageBusType.TOOL_EXECUTION_SUCCESS, handler);
+
+      expect(removeEventListenerSpy).toHaveBeenCalledWith(
+        'abort',
+        expect.any(Function),
       );
     });
   });

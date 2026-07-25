@@ -7,15 +7,13 @@
 import type {
   Config,
   ToolCallRequestInfo,
-  CompletedToolCall,
+  ResumedSessionData,
   UserFeedbackPayload,
 } from '@google/gemini-cli-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
-  executeToolCall,
-  shutdownTelemetry,
-  isTelemetrySdkInitialized,
+  convertSessionToClientHistory,
   GeminiEventType,
   FatalInputError,
   promptIdContext,
@@ -27,10 +25,16 @@ import {
   debugLogger,
   coreEvents,
   CoreEvent,
+  createWorkingStdio,
+  recordToolCallInteractions,
+  ToolErrorType,
+  Scheduler,
+  ROOT_SCHEDULER_ID,
 } from '@google/gemini-cli-core';
 
 import type { Content, Part } from '@google/genai';
 import readline from 'node:readline';
+import stripAnsi from 'strip-ansi';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
@@ -42,28 +46,55 @@ import {
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
 import { TextOutput } from './ui/utils/textOutput.js';
+import { runNonInteractive as runNonInteractiveAgentSession } from './nonInteractiveCliAgentSession.js';
 
 interface RunNonInteractiveParams {
   config: Config;
   settings: LoadedSettings;
   input: string;
   prompt_id: string;
-  hasDeprecatedPromptArg?: boolean;
+  resumedSessionData?: ResumedSessionData;
 }
 
-export async function runNonInteractive({
-  config,
-  settings,
-  input,
-  prompt_id,
-  hasDeprecatedPromptArg,
-}: RunNonInteractiveParams): Promise<void> {
+/**
+ * Runs the non-interactive CLI loop.
+ *
+ * Programmatic output formats (JSON, STREAM_JSON) use lenient sanitization
+ * by stripping ANSI escape sequences from messages to ensure clean,
+ * parseable output for downstream consumers.
+ */
+export async function runNonInteractive(
+  params: RunNonInteractiveParams,
+): Promise<void> {
+  const useAgentSession = params.config.getAgentSessionNoninteractiveEnabled();
+  if (useAgentSession) {
+    debugLogger.debug(
+      '[ADK] Running non-interactive mode with ADK agent session',
+    );
+    return runNonInteractiveAgentSession(params);
+  }
+
+  const { config, settings, input, prompt_id, resumedSessionData } = params;
+
   return promptIdContext.run(prompt_id, async () => {
     const consolePatcher = new ConsolePatcher({
       stderr: true,
+      interactive: false,
       debugMode: config.getDebugMode(),
+      onNewMessage: (msg) => {
+        coreEvents.emitConsoleLog(msg.type, msg.content);
+      },
     });
-    const textOutput = new TextOutput();
+
+    if (process.env['GEMINI_CLI_ACTIVITY_LOG_TARGET']) {
+      const { setupInitialActivityLogger } = await import(
+        './utils/devtoolsService.js'
+      );
+      setupInitialActivityLogger(config);
+    }
+
+    const { stdout: workingStdout } = createWorkingStdio();
+    const textOutput = new TextOutput(workingStdout);
 
     const handleUserFeedback = (payload: UserFeedbackPayload) => {
       const prefix = payload.severity.toUpperCase();
@@ -166,14 +197,25 @@ export async function runNonInteractive({
     };
 
     let errorToHandle: unknown | undefined;
+    let scheduler: Scheduler | undefined;
     try {
       consolePatcher.patch();
+
+      if (
+        config.getRawOutput() &&
+        !config.getAcceptRawOutputRisk() &&
+        config.getOutputFormat() === OutputFormat.TEXT
+      ) {
+        process.stderr.write(
+          '[WARNING] --raw-output is enabled. Model output is not sanitized and may contain harmful ANSI sequences (e.g. for phishing or command injection). Use --accept-raw-output-risk to suppress this warning.\n',
+        );
+      }
 
       // Setup stdin cancellation listener
       setupStdinCancellation();
 
       coreEvents.on(CoreEvent.UserFeedback, handleUserFeedback);
-      coreEvents.drainFeedbackBacklog();
+      coreEvents.drainBacklogs();
 
       // Handle EPIPE errors when the output is piped to a command that closes early.
       process.stdout.on('error', (err: NodeJS.ErrnoException) => {
@@ -184,6 +226,22 @@ export async function runNonInteractive({
       });
 
       const geminiClient = config.getGeminiClient();
+      scheduler = new Scheduler({
+        context: config,
+        messageBus: config.getMessageBus(),
+        getPreferredEditor: () => undefined,
+        schedulerId: ROOT_SCHEDULER_ID,
+      });
+
+      // Initialize chat.  Resume if resume data is passed.
+      if (resumedSessionData) {
+        await geminiClient.resumeChat(
+          convertSessionToClientHistory(
+            resumedSessionData.conversation.messages,
+          ),
+          resumedSessionData,
+        );
+      }
 
       // Emit init event for streaming JSON
       if (streamFormatter) {
@@ -205,30 +263,32 @@ export async function runNonInteractive({
           settings,
         );
         // If a slash command is found and returns a prompt, use it.
-        // Otherwise, slashCommandResult fall through to the default prompt
+        // Otherwise, slashCommandResult falls through to the default prompt
         // handling.
         if (slashCommandResult) {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
           query = slashCommandResult as Part[];
         }
       }
 
       if (!query) {
-        const { processedQuery, shouldProceed } = await handleAtCommand({
+        const { processedQuery, error } = await handleAtCommand({
           query: input,
           config,
           addItem: (_item, _timestamp) => 0,
           onDebugMessage: () => {},
           messageId: Date.now(),
           signal: abortController.signal,
+          escapePastedAtSymbols: false,
         });
-
-        if (!shouldProceed || !processedQuery) {
+        if (error || !processedQuery) {
           // An error occurred during @include processing (e.g., file not found).
           // The error message is already logged by handleAtCommand.
           throw new FatalInputError(
-            'Exiting due to an error processing the @ command.',
+            error || 'Exiting due to an error processing the @ command.',
           );
         }
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
         query = processedQuery as Part[];
       }
 
@@ -245,21 +305,8 @@ export async function runNonInteractive({
       let currentMessages: Content[] = [{ role: 'user', parts: query }];
 
       let turnCount = 0;
-      const deprecateText =
-        'The --prompt (-p) flag has been deprecated and will be removed in a future version. Please use a positional argument for your prompt. See gemini --help for more information.\n';
-      if (hasDeprecatedPromptArg) {
-        if (streamFormatter) {
-          streamFormatter.emitEvent({
-            type: JsonStreamEventType.MESSAGE,
-            timestamp: new Date().toISOString(),
-            role: 'assistant',
-            content: deprecateText,
-            delta: true,
-          });
-        } else {
-          process.stderr.write(deprecateText);
-        }
-      }
+      let invalidStreamError: string | undefined;
+      const warnings: string[] = [];
       while (true) {
         turnCount++;
         if (
@@ -274,6 +321,8 @@ export async function runNonInteractive({
           currentMessages[0]?.parts || [],
           abortController.signal,
           prompt_id,
+          undefined,
+          turnCount === 1 ? input : undefined,
         );
 
         let responseText = '';
@@ -283,19 +332,22 @@ export async function runNonInteractive({
           }
 
           if (event.type === GeminiEventType.Content) {
+            const isRaw =
+              config.getRawOutput() || config.getAcceptRawOutputRisk();
+            const output = isRaw ? event.value : stripAnsi(event.value);
             if (streamFormatter) {
               streamFormatter.emitEvent({
                 type: JsonStreamEventType.MESSAGE,
                 timestamp: new Date().toISOString(),
                 role: 'assistant',
-                content: event.value,
+                content: output,
                 delta: true,
               });
             } else if (config.getOutputFormat() === OutputFormat.JSON) {
-              responseText += event.value;
+              responseText += output;
             } else {
               if (event.value) {
-                textOutput.write(event.value);
+                textOutput.write(output);
               }
             }
           } else if (event.type === GeminiEventType.ToolCallRequest) {
@@ -310,49 +362,113 @@ export async function runNonInteractive({
             }
             toolCallRequests.push(event.value);
           } else if (event.type === GeminiEventType.LoopDetected) {
+            const message = 'Loop detected, stopping execution';
             if (streamFormatter) {
               streamFormatter.emitEvent({
                 type: JsonStreamEventType.ERROR,
                 timestamp: new Date().toISOString(),
                 severity: 'warning',
-                message: 'Loop detected, stopping execution',
+                message,
               });
             }
+            warnings.push(message);
           } else if (event.type === GeminiEventType.MaxSessionTurns) {
+            const message = 'Maximum session turns exceeded';
             if (streamFormatter) {
               streamFormatter.emitEvent({
                 type: JsonStreamEventType.ERROR,
                 timestamp: new Date().toISOString(),
                 severity: 'error',
-                message: 'Maximum session turns exceeded',
+                message,
               });
             }
+            warnings.push(message);
           } else if (event.type === GeminiEventType.Error) {
             throw event.value.error;
+          } else if (event.type === GeminiEventType.AgentExecutionStopped) {
+            const stopMessage = `Agent execution stopped: ${event.value.systemMessage?.trim() || event.value.reason}`;
+            if (config.getOutputFormat() === OutputFormat.TEXT) {
+              process.stderr.write(`${stopMessage}\n`);
+            }
+            // Emit final result event for streaming JSON if needed
+            if (streamFormatter) {
+              const metrics = uiTelemetryService.getMetrics();
+              const durationMs = Date.now() - startTime;
+              streamFormatter.emitEvent({
+                type: JsonStreamEventType.RESULT,
+                timestamp: new Date().toISOString(),
+                status: 'success',
+                stats: streamFormatter.convertToStreamStats(
+                  metrics,
+                  durationMs,
+                ),
+              });
+            } else if (config.getOutputFormat() === OutputFormat.JSON) {
+              const formatter = new JsonFormatter();
+              const stats = uiTelemetryService.getMetrics();
+              textOutput.write(
+                formatter.format(
+                  config.getSessionId(),
+                  responseText,
+                  stats,
+                  undefined,
+                  [...warnings, stopMessage],
+                ),
+              );
+            } else {
+              textOutput.ensureTrailingNewline(); // Ensure a final newline
+            }
+            return;
+          } else if (event.type === GeminiEventType.AgentExecutionBlocked) {
+            const blockMessage = `Agent execution blocked: ${event.value.systemMessage?.trim() || event.value.reason}`;
+            if (config.getOutputFormat() === OutputFormat.TEXT) {
+              process.stderr.write(`[WARNING] ${blockMessage}\n`);
+            } else if (streamFormatter) {
+              streamFormatter.emitEvent({
+                type: JsonStreamEventType.ERROR,
+                timestamp: new Date().toISOString(),
+                severity: 'warning',
+                message: stripAnsi(blockMessage),
+              });
+            }
+            warnings.push(blockMessage);
+          } else if (event.type === GeminiEventType.InvalidStream) {
+            invalidStreamError =
+              'Invalid stream: The model returned an empty response or malformed tool call.';
+            if (streamFormatter) {
+              streamFormatter.emitEvent({
+                type: JsonStreamEventType.ERROR,
+                timestamp: new Date().toISOString(),
+                severity: 'error',
+                message: invalidStreamError,
+              });
+            } else if (config.getOutputFormat() === OutputFormat.TEXT) {
+              process.stderr.write(`[ERROR] ${invalidStreamError}\n`);
+            }
+            toolCallRequests.length = 0;
+            break;
           }
         }
 
         if (toolCallRequests.length > 0) {
           textOutput.ensureTrailingNewline();
+          const completedToolCalls = await scheduler.schedule(
+            toolCallRequests,
+            abortController.signal,
+          );
           const toolResponseParts: Part[] = [];
-          const completedToolCalls: CompletedToolCall[] = [];
 
-          for (const requestInfo of toolCallRequests) {
-            const completedToolCall = await executeToolCall(
-              config,
-              requestInfo,
-              abortController.signal,
-            );
+          for (const completedToolCall of completedToolCalls) {
             const toolResponse = completedToolCall.response;
-
-            completedToolCalls.push(completedToolCall);
+            const requestInfo = completedToolCall.request;
 
             if (streamFormatter) {
               streamFormatter.emitEvent({
                 type: JsonStreamEventType.TOOL_RESULT,
                 timestamp: new Date().toISOString(),
                 tool_id: requestInfo.callId,
-                status: toolResponse.error ? 'error' : 'success',
+                status:
+                  completedToolCall.status === 'error' ? 'error' : 'success',
                 output:
                   typeof toolResponse.resultDisplay === 'string'
                     ? toolResponse.resultDisplay
@@ -390,10 +506,55 @@ export async function runNonInteractive({
             geminiClient
               .getChat()
               .recordCompletedToolCalls(currentModel, completedToolCalls);
+
+            await recordToolCallInteractions(config, completedToolCalls);
           } catch (error) {
             debugLogger.error(
               `Error recording completed tool call information: ${error}`,
             );
+          }
+
+          // Check if any tool requested to stop execution immediately
+          const stopExecutionTool = completedToolCalls.find(
+            (tc) => tc.response.errorType === ToolErrorType.STOP_EXECUTION,
+          );
+
+          if (stopExecutionTool && stopExecutionTool.response.error) {
+            const stopMessage = `Agent execution stopped: ${stopExecutionTool.response.error.message}`;
+
+            if (config.getOutputFormat() === OutputFormat.TEXT) {
+              process.stderr.write(`${stopMessage}\n`);
+            }
+
+            // Emit final result event for streaming JSON
+            if (streamFormatter) {
+              const metrics = uiTelemetryService.getMetrics();
+              const durationMs = Date.now() - startTime;
+              streamFormatter.emitEvent({
+                type: JsonStreamEventType.RESULT,
+                timestamp: new Date().toISOString(),
+                status: 'success',
+                stats: streamFormatter.convertToStreamStats(
+                  metrics,
+                  durationMs,
+                ),
+              });
+            } else if (config.getOutputFormat() === OutputFormat.JSON) {
+              const formatter = new JsonFormatter();
+              const stats = uiTelemetryService.getMetrics();
+              textOutput.write(
+                formatter.format(
+                  config.getSessionId(),
+                  responseText,
+                  stats,
+                  undefined,
+                  warnings,
+                ),
+              );
+            } else {
+              textOutput.ensureTrailingNewline(); // Ensure a final newline
+            }
+            return;
           }
 
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
@@ -405,13 +566,23 @@ export async function runNonInteractive({
             streamFormatter.emitEvent({
               type: JsonStreamEventType.RESULT,
               timestamp: new Date().toISOString(),
-              status: 'success',
+              status: invalidStreamError ? 'error' : 'success',
               stats: streamFormatter.convertToStreamStats(metrics, durationMs),
             });
           } else if (config.getOutputFormat() === OutputFormat.JSON) {
             const formatter = new JsonFormatter();
             const stats = uiTelemetryService.getMetrics();
-            textOutput.write(formatter.format(responseText, stats));
+            textOutput.write(
+              formatter.format(
+                config.getSessionId(),
+                responseText,
+                stats,
+                invalidStreamError
+                  ? { type: 'INVALID_STREAM', message: invalidStreamError }
+                  : undefined,
+                warnings,
+              ),
+            );
           } else {
             textOutput.ensureTrailingNewline(); // Ensure a final newline
           }
@@ -424,11 +595,9 @@ export async function runNonInteractive({
       // Cleanup stdin cancellation before other cleanup
       cleanupStdinCancellation();
 
+      scheduler?.dispose();
       consolePatcher.cleanup();
       coreEvents.off(CoreEvent.UserFeedback, handleUserFeedback);
-      if (isTelemetrySdkInitialized()) {
-        await shutdownTelemetry(config);
-      }
     }
 
     if (errorToHandle) {

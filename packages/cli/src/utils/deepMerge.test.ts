@@ -152,12 +152,89 @@ describe('customDeepMerge', () => {
   });
 
   it('should not pollute the prototype', () => {
-    const maliciousSource = JSON.parse('{"__proto__": {"polluted": "true"}}');
+    const maliciousSource = JSON.parse('{"__proto__": {"polluted1": "true"}}');
     const getMergeStrategy = () => undefined;
-    const result = customDeepMerge(getMergeStrategy, {}, maliciousSource);
+    let result = customDeepMerge(getMergeStrategy, {}, maliciousSource);
 
     expect(result).toEqual({});
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect(({} as any).polluted).toBeUndefined();
+    expect(({} as any).polluted1).toBeUndefined();
+
+    const maliciousSource2 = JSON.parse(
+      '{"constructor": {"prototype": {"polluted2": "true"}}}',
+    );
+    result = customDeepMerge(getMergeStrategy, {}, maliciousSource2);
+    expect(result).toEqual({});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(({} as any).polluted2).toBeUndefined();
+
+    const maliciousSource3 = JSON.parse('{"prototype": {"polluted3": "true"}}');
+    result = customDeepMerge(getMergeStrategy, {}, maliciousSource3);
+    expect(result).toEqual({});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(({} as any).polluted3).toBeUndefined();
+  });
+
+  it('should use additionalProperties merge strategy for dynamic properties', () => {
+    // Simulates how hooks work: hooks.disabled uses UNION, but hooks.BeforeTool (dynamic) uses CONCAT
+    const target = {
+      hooks: {
+        BeforeTool: [{ command: 'user-hook-1' }, { command: 'user-hook-2' }],
+        disabled: ['hook-a'],
+      },
+    };
+    const source = {
+      hooks: {
+        BeforeTool: [{ command: 'workspace-hook-1' }],
+        disabled: ['hook-b'],
+      },
+    };
+
+    // Mock the getMergeStrategyForPath behavior for hooks
+    const getMergeStrategy = (path: string[]) => {
+      const p = path.join('.');
+      // hooks.disabled uses UNION strategy (explicitly defined in schema)
+      if (p === 'hooks.disabled') return MergeStrategy.UNION;
+      // hooks.BeforeTool uses CONCAT strategy (via additionalProperties)
+      if (p === 'hooks.BeforeTool') return MergeStrategy.CONCAT;
+      return undefined;
+    };
+
+    const result = customDeepMerge(getMergeStrategy, target, source);
+
+    // BeforeTool should concatenate
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((result as any)['hooks']['BeforeTool']).toEqual([
+      { command: 'user-hook-1' },
+      { command: 'user-hook-2' },
+      { command: 'workspace-hook-1' },
+    ]);
+    // disabled should union (deduplicate)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((result as any)['hooks']['disabled']).toEqual(['hook-a', 'hook-b']);
+  });
+
+  it('should overwrite primitive with object', () => {
+    const target = { a: 1 };
+    const source = { a: { b: 2 } };
+    const getMergeStrategy = () => undefined;
+    const result = customDeepMerge(getMergeStrategy, target, source);
+    expect(result).toEqual({ a: { b: 2 } });
+  });
+
+  it('should overwrite object with primitive', () => {
+    const target = { a: { b: 2 } };
+    const source = { a: 1 };
+    const getMergeStrategy = () => undefined;
+    const result = customDeepMerge(getMergeStrategy, target, source);
+    expect(result).toEqual({ a: 1 });
+  });
+
+  it('should not overwrite with undefined', () => {
+    const target = { a: 1 };
+    const source = { a: undefined };
+    const getMergeStrategy = () => undefined;
+    const result = customDeepMerge(getMergeStrategy, target, source);
+    expect(result).toEqual({ a: 1 });
   });
 });

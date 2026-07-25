@@ -4,14 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@google/gemini-cli-core';
-import { getErrorMessage, getMCPServerPrompts } from '@google/gemini-cli-core';
-import type {
-  CommandContext,
-  SlashCommand,
-  SlashCommandActionReturn,
+import {
+  getErrorMessage,
+  getMCPServerPrompts,
+  type Config,
+} from '@google/gemini-cli-core';
+import {
+  CommandKind,
+  type CommandContext,
+  type SlashCommand,
+  type SlashCommandActionReturn,
 } from '../ui/commands/types.js';
-import { CommandKind } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import type { PromptArgument } from '@modelcontextprotocol/sdk/types.js';
 
@@ -38,11 +41,14 @@ export class McpPromptLoader implements ICommandLoader {
     for (const serverName in mcpServers) {
       const prompts = getMCPServerPrompts(this.config, serverName) || [];
       for (const prompt of prompts) {
-        const commandName = `${prompt.name}`;
+        // Sanitize prompt names to ensure they are valid slash commands (e.g. "Prompt Name" -> "Prompt-Name")
+        const commandName = `${prompt.name}`.trim().replace(/\s+/g, '-');
         const newPromptCommand: SlashCommand = {
           name: commandName,
           description: prompt.description || `Invoke prompt ${prompt.name}`,
           kind: CommandKind.MCP_PROMPT,
+          mcpServerName: serverName,
+          autoExecute: !prompt.arguments || prompt.arguments.length === 0,
           subCommands: [
             {
               name: 'help',
@@ -121,7 +127,8 @@ export class McpPromptLoader implements ICommandLoader {
                 };
               }
 
-              if (!result.messages?.[0]?.content?.['text']) {
+              const maybeContent = result.messages?.[0]?.content;
+              if (maybeContent.type !== 'text') {
                 return {
                   type: 'message',
                   messageType: 'error',
@@ -132,7 +139,7 @@ export class McpPromptLoader implements ICommandLoader {
 
               return {
                 type: 'submit_prompt',
-                content: JSON.stringify(result.messages[0].content.text),
+                content: JSON.stringify(maybeContent.text),
               };
             } catch (error) {
               return {
@@ -151,16 +158,15 @@ export class McpPromptLoader implements ICommandLoader {
               return [];
             }
             const indexOfFirstSpace = invocation.raw.indexOf(' ') + 1;
-            let promptInputs =
+            const parsedInputs =
               indexOfFirstSpace === 0
                 ? {}
                 : this.parseArgs(
                     invocation.raw.substring(indexOfFirstSpace),
                     prompt.arguments,
                   );
-            if (promptInputs instanceof Error) {
-              promptInputs = {};
-            }
+            const promptInputs =
+              parsedInputs instanceof Error ? {} : parsedInputs;
 
             const providedArgNames = Object.keys(promptInputs);
             const unusedArguments =

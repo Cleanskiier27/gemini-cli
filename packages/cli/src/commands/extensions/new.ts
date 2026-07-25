@@ -9,6 +9,7 @@ import { join, dirname, basename } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { fileURLToPath } from 'node:url';
 import { debugLogger } from '@google/gemini-cli-core';
+import { exitCli } from '../utils.js';
 
 interface NewArgs {
   path: string;
@@ -24,7 +25,7 @@ async function pathExists(path: string) {
   try {
     await access(path);
     return true;
-  } catch (_e) {
+  } catch {
     return false;
   }
 }
@@ -97,8 +98,11 @@ export const newCommand: CommandModule = {
   },
   handler: async (args) => {
     await handleNew({
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       path: args['path'] as string,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       template: args['template'] as string | undefined,
     });
+    await exitCli();
   },
 };

@@ -5,6 +5,13 @@
  */
 
 import type { GenerateContentConfig } from '@google/genai';
+import type { ModelPolicy } from '../availability/modelPolicy.js';
+import {
+  getDisplayString,
+  PREVIEW_GEMINI_3_1_MODEL,
+  isProModel,
+  getAutoModelDescription,
+} from '../config/models.js';
 
 // The primary key for the ModelConfig is the model string. However, we also
 // support a secondary key to limit the override scope, typically an agent name.
@@ -21,6 +28,15 @@ export interface ModelConfigKey {
   // model calls made by this specific subagent, and no others, while still
   // ensuring model configs are fully orthogonal to the agents who use them.
   overrideScope?: string;
+
+  // Indicates whether this configuration request is happening during a retry attempt.
+  // This allows overrides to specify different settings (e.g., higher temperature)
+  // specifically for retry scenarios.
+  isRetry?: boolean;
+
+  // Indicates whether this request originates from the primary interactive chat model.
+  // Enables the default fallback configuration to `chat-base` when unknown.
+  isChatModel?: boolean;
 }
 
 export interface ModelConfig {
@@ -32,6 +48,7 @@ export interface ModelConfigOverride {
   match: {
     model?: string; // Can be a model name or an alias
     overrideScope?: string;
+    isRetry?: boolean;
   };
   modelConfig: ModelConfig;
 }
@@ -41,10 +58,75 @@ export interface ModelConfigAlias {
   modelConfig: ModelConfig;
 }
 
+// A model definition is a mapping from a model name to a list of features
+// that the model supports. Model names can be either direct model IDs
+// (gemini-2.5-pro) or aliases (auto).
+export interface ModelDefinition {
+  displayName?: string;
+  tier?: string; // 'pro' | 'flash' | 'flash-lite' | 'custom' | 'auto'
+  family?: string; // The gemini family, e.g. 'gemini-3' | 'gemini-2'
+  isPreview?: boolean;
+  // Specifies whether the model should be visible in the dialog.
+  isVisible?: boolean;
+  /** A short description of the model for the dialog. */
+  dialogDescription?: string;
+  features?: {
+    // Whether the model supports thinking.
+    thinking?: boolean;
+    // Whether the model supports mutlimodal function responses. This is
+    // supported in Gemini 3.
+    multimodalToolUse?: boolean;
+  };
+}
+
+// A model resolution is a mapping from a model name to a list of conditions
+// that can be used to resolve the model to a model ID.
+export interface ModelResolution {
+  // The default model ID to use when no conditions are met.
+  default: string;
+  // A list of conditions that can be used to resolve the model.
+  contexts?: Array<{
+    // The condition to check for.
+    condition: ResolutionCondition;
+    // The model ID to use when the condition is met.
+    target: string;
+  }>;
+}
+
+/** The actual state of the current session. */
+export interface ResolutionContext {
+  useGemini3_1?: boolean;
+  useGemini3_1FlashLite?: boolean;
+  useGemini3_5Flash?: boolean;
+  useCustomTools?: boolean;
+  hasAccessToPreview?: boolean;
+  hasAccessToProModel?: boolean;
+  requestedModel?: string;
+}
+
+/** The requirements defined in the registry. */
+export interface ResolutionCondition {
+  useGemini3_1?: boolean;
+  useGemini3_1FlashLite?: boolean;
+  useGemini3_5Flash?: boolean;
+  useCustomTools?: boolean;
+  hasAccessToPreview?: boolean;
+  /** Matches if the current model is in this list. */
+  requestedModels?: string[];
+}
+
 export interface ModelConfigServiceConfig {
   aliases?: Record<string, ModelConfigAlias>;
+  customAliases?: Record<string, ModelConfigAlias>;
   overrides?: ModelConfigOverride[];
+  customOverrides?: ModelConfigOverride[];
+  modelDefinitions?: Record<string, ModelDefinition>;
+  modelIdResolutions?: Record<string, ModelResolution>;
+  classifierIdResolutions?: Record<string, ModelResolution>;
+  modelChains?: Record<string, ModelPolicy[]>;
 }
+
+const MAX_ALIAS_CHAIN_DEPTH = 100;
 
 export type ResolvedModelConfig = _ResolvedModelConfig & {
   readonly _brand: unique symbol;
@@ -56,134 +138,436 @@ export interface _ResolvedModelConfig {
 }
 
 export class ModelConfigService {
+  private readonly runtimeAliases: Record<string, ModelConfigAlias> = {};
+  private readonly runtimeOverrides: ModelConfigOverride[] = [];
+
   // TODO(12597): Process config to build a typed alias hierarchy.
   constructor(private readonly config: ModelConfigServiceConfig) {}
 
-  private resolveAlias(
-    aliasName: string,
-    aliases: Record<string, ModelConfigAlias>,
-    visited = new Set<string>(),
-  ): ModelConfigAlias {
-    if (visited.has(aliasName)) {
-      throw new Error(
-        `Circular alias dependency: ${[...visited, aliasName].join(' -> ')}`,
-      );
-    }
-    visited.add(aliasName);
+  /**
+   * Returns a standardized list of available model options based on the resolution context.
+   * This logic is shared across the TUI and ACP mode.
+   */
+  getAvailableModelOptions(context: ResolutionContext): Array<{
+    modelId: string;
+    name: string;
+    description: string;
+    tier: string;
+  }> {
+    const definitions = this.config.modelDefinitions ?? {};
+    const shouldShowPreviewModels = context.hasAccessToPreview ?? false;
+    const useGemini31 = context.useGemini3_1 ?? false;
+    const useGemini3_5Flash = context.useGemini3_5Flash ?? false;
 
-    const alias = aliases[aliasName];
-    if (!alias) {
-      throw new Error(`Alias "${aliasName}" not found.`);
-    }
+    const mainOptions = Object.entries(definitions)
+      .filter(([_, m]) => {
+        if (m.isVisible !== true) return false;
+        if (m.isPreview && !shouldShowPreviewModels) return false;
+        if (m.tier !== 'auto') return false;
+        return true;
+      })
+      .map(([id, m]) => {
+        let description = m.dialogDescription ?? '';
+        if (id === 'auto') {
+          description = getAutoModelDescription(
+            shouldShowPreviewModels,
+            useGemini31,
+            useGemini3_5Flash,
+          );
+        } else if (id === 'auto-gemini-3' && useGemini31) {
+          description = description.replace('gemini-3-pro', 'gemini-3.1-pro');
+        }
 
-    if (!alias.extends) {
-      return alias;
-    }
+        return {
+          modelId: id,
+          name: m.displayName ?? getDisplayString(id),
+          description,
+          tier: m.tier ?? 'auto',
+        };
+      });
 
-    const baseAlias = this.resolveAlias(alias.extends, aliases, visited);
+    const manualOptions = Object.entries(definitions)
+      .filter(([id, m]) => {
+        if (m.isVisible !== true) return false;
+        if (m.isPreview && !shouldShowPreviewModels) return false;
+        if (m.tier === 'auto') return false;
+        if (context.hasAccessToProModel === false && isProModel(id))
+          return false;
+        if (id === PREVIEW_GEMINI_3_1_MODEL && !useGemini31) return false;
+        return true;
+      })
+      .map(([id, m]) => {
+        const resolvedId = this.resolveModelId(id, context);
+        const titleId = this.resolveModelId(id, {
+          useGemini3_1: useGemini31,
+        });
+        return {
+          modelId: resolvedId,
+          name: m.displayName ?? getDisplayString(titleId),
+          description: m.dialogDescription ?? '',
+          tier: m.tier ?? 'custom',
+        };
+      });
 
-    return {
-      modelConfig: {
-        model: alias.modelConfig.model ?? baseAlias.modelConfig.model,
-        generateContentConfig: this.deepMerge(
-          baseAlias.modelConfig.generateContentConfig,
-          alias.modelConfig.generateContentConfig,
-        ),
-      },
-    };
+    // Deduplicate manual options
+    const seen = new Set<string>();
+    const uniqueManualOptions = manualOptions.filter((option) => {
+      if (seen.has(option.modelId)) return false;
+      seen.add(option.modelId);
+      return true;
+    });
+
+    return [...mainOptions, ...uniqueManualOptions];
   }
 
+  getModelDefinition(modelId: string): ModelDefinition | undefined {
+    const definition = this.config.modelDefinitions?.[modelId];
+    if (definition) {
+      return definition;
+    }
+
+    // For unknown models, return an implicit custom definition to match legacy behavior.
+    if (!modelId.startsWith('gemini-')) {
+      return {
+        tier: 'custom',
+        family: 'custom',
+        features: {},
+      };
+    }
+
+    return undefined;
+  }
+
+  getModelDefinitions(): Record<string, ModelDefinition> {
+    return this.config.modelDefinitions ?? {};
+  }
+
+  private matches(
+    condition: ResolutionCondition,
+    context: ResolutionContext,
+  ): boolean {
+    return Object.entries(condition).every(([key, value]) => {
+      if (value === undefined) return true;
+
+      switch (key) {
+        case 'useGemini3_1':
+          return value === context.useGemini3_1;
+        case 'useGemini3_1FlashLite':
+          return value === context.useGemini3_1FlashLite;
+        case 'useGemini3_5Flash':
+          return value === context.useGemini3_5Flash;
+        case 'useCustomTools':
+          return value === context.useCustomTools;
+        case 'hasAccessToPreview':
+          return value === context.hasAccessToPreview;
+        case 'requestedModels':
+          return (
+            Array.isArray(value) &&
+            !!context.requestedModel &&
+            value.includes(context.requestedModel)
+          );
+        default:
+          return false;
+      }
+    });
+  }
+
+  // Resolves a model ID to a concrete model ID based on the provided context.
+  resolveModelId(
+    requestedName: string,
+    context: ResolutionContext = {},
+  ): string {
+    const resolution = this.config.modelIdResolutions?.[requestedName];
+    if (!resolution) {
+      return requestedName;
+    }
+
+    for (const ctx of resolution.contexts ?? []) {
+      if (this.matches(ctx.condition, context)) {
+        return ctx.target;
+      }
+    }
+
+    return resolution.default;
+  }
+
+  // Resolves a classifier model ID to a concrete model ID based on the provided context.
+  resolveClassifierModelId(
+    tier: string,
+    requestedModel: string,
+    context: ResolutionContext = {},
+  ): string {
+    const resolution = this.config.classifierIdResolutions?.[tier];
+    const fullContext: ResolutionContext = { ...context, requestedModel };
+
+    if (!resolution) {
+      // Fallback to regular model resolution if no classifier-specific rule exists
+      return this.resolveModelId(tier, fullContext);
+    }
+
+    for (const ctx of resolution.contexts ?? []) {
+      if (this.matches(ctx.condition, fullContext)) {
+        return ctx.target;
+      }
+    }
+
+    return resolution.default;
+  }
+
+  getModelChain(chainName: string): ModelPolicy[] | undefined {
+    return this.config.modelChains?.[chainName];
+  }
+
+  /**
+   * Fetches a chain template and resolves all model IDs within it
+   * based on the provided context.
+   */
+  resolveChain(
+    chainName: string,
+    context: ResolutionContext = {},
+  ): ModelPolicy[] | undefined {
+    const template = this.config.modelChains?.[chainName];
+    if (!template) {
+      return undefined;
+    }
+    // Map through the template and resolve each model ID
+    return template.map((policy) => ({
+      ...policy,
+      model: this.resolveModelId(policy.model, context),
+    }));
+  }
+
+  registerRuntimeModelConfig(aliasName: string, alias: ModelConfigAlias): void {
+    this.runtimeAliases[aliasName] = alias;
+  }
+
+  registerRuntimeModelOverride(override: ModelConfigOverride): void {
+    this.runtimeOverrides.push(override);
+  }
+
+  clearRuntimeOverrides(): void {
+    this.runtimeOverrides.length = 0;
+  }
+
+  /**
+   * Resolves a model configuration by merging settings from aliases and applying overrides.
+   *
+   * The resolution follows a linear application pipeline:
+   *
+   * 1. Alias Chain Resolution:
+   *    Builds the inheritance chain from root to leaf. Configurations are merged starting from
+   *    the root, so that children naturally override parents.
+   *
+   * 2. Override Level Assignment:
+   *    Overrides are matched against the hierarchy and assigned a "Level" for application:
+   *    - Level 0: Broad matches (Global or Resolved Model name).
+   *    - Level 1..N: Hierarchy matches (from Root-most alias to Leaf-most alias).
+   *
+   * 3. Precedence & Application:
+   *    Overrides are applied in order of their Level (ASC), then Specificity (ASC), then
+   *    Configuration Order (ASC). This ensures that more targeted and "deeper" rules
+   *    naturally layer on top of broader ones.
+   *
+   * 4. Orthogonality:
+   *    All fields (including 'model') are treated equally. A more specific or deeper override
+   *    can freely change any setting, including the target model name.
+   */
   private internalGetResolvedConfig(context: ModelConfigKey): {
     model: string | undefined;
     generateContentConfig: GenerateContentConfig;
   } {
-    const config = this.config || {};
-    const { aliases = {}, overrides = [] } = config;
-    let baseModel: string | undefined = context.model;
-    let resolvedConfig: GenerateContentConfig = {};
+    const {
+      aliases = {},
+      customAliases = {},
+      overrides = [],
+      customOverrides = [],
+    } = this.config || {};
+    const allAliases = {
+      ...aliases,
+      ...customAliases,
+      ...this.runtimeAliases,
+    };
 
-    // Step 1: Alias Resolution
-    if (aliases[context.model]) {
-      const resolvedAlias = this.resolveAlias(context.model, aliases);
-      baseModel = resolvedAlias.modelConfig.model; // This can now be undefined
-      resolvedConfig = this.deepMerge(
-        resolvedConfig,
-        resolvedAlias.modelConfig.generateContentConfig,
+    const { aliasChain, baseModel, resolvedConfig } = this.resolveAliasChain(
+      context.model,
+      allAliases,
+      context.isChatModel,
+    );
+
+    const modelToLevel = this.buildModelLevelMap(aliasChain, baseModel);
+    const allOverrides = [
+      ...overrides,
+      ...customOverrides,
+      ...this.runtimeOverrides,
+    ];
+    const matches = this.findMatchingOverrides(
+      allOverrides,
+      context,
+      modelToLevel,
+    );
+
+    this.sortOverrides(matches);
+
+    let currentConfig: ModelConfig = {
+      model: baseModel,
+      generateContentConfig: resolvedConfig,
+    };
+
+    for (const match of matches) {
+      currentConfig = ModelConfigService.merge(
+        currentConfig,
+        match.modelConfig,
       );
     }
 
-    // If an alias was used but didn't resolve to a model, `baseModel` is undefined.
-    // We still need a model for matching overrides. We'll use the original alias name
-    // for matching if no model is resolved yet.
-    const modelForMatching = baseModel ?? context.model;
-
-    const finalContext = {
-      ...context,
-      model: modelForMatching,
+    return {
+      model: currentConfig.model,
+      generateContentConfig: currentConfig.generateContentConfig ?? {},
     };
+  }
 
-    // Step 2: Override Application
-    const matches = overrides
+  private resolveAliasChain(
+    requestedModel: string,
+    allAliases: Record<string, ModelConfigAlias>,
+    isChatModel?: boolean,
+  ): {
+    aliasChain: string[];
+    baseModel: string | undefined;
+    resolvedConfig: GenerateContentConfig;
+  } {
+    const aliasChain: string[] = [];
+
+    if (allAliases[requestedModel]) {
+      let current: string | undefined = requestedModel;
+      const visited = new Set<string>();
+      while (current) {
+        const alias: ModelConfigAlias = allAliases[current];
+        if (!alias) {
+          throw new Error(`Alias "${current}" not found.`);
+        }
+        if (visited.size >= MAX_ALIAS_CHAIN_DEPTH) {
+          throw new Error(
+            `Alias inheritance chain exceeded maximum depth of ${MAX_ALIAS_CHAIN_DEPTH}.`,
+          );
+        }
+        if (visited.has(current)) {
+          throw new Error(
+            `Circular alias dependency: ${[...visited, current].join(' -> ')}`,
+          );
+        }
+        visited.add(current);
+        aliasChain.push(current);
+        current = alias.extends;
+      }
+
+      // Root-to-Leaf chain for merging and level assignment.
+      const reversedChain = [...aliasChain].reverse();
+      let resolvedConfig: ModelConfig = {};
+      for (const aliasName of reversedChain) {
+        const alias = allAliases[aliasName];
+        resolvedConfig = ModelConfigService.merge(
+          resolvedConfig,
+          alias.modelConfig,
+        );
+      }
+      return {
+        aliasChain: reversedChain,
+        baseModel: resolvedConfig.model,
+        resolvedConfig: resolvedConfig.generateContentConfig ?? {},
+      };
+    }
+
+    if (isChatModel) {
+      const fallbackAlias = 'chat-base';
+      if (allAliases[fallbackAlias]) {
+        const fallbackResolution = this.resolveAliasChain(
+          fallbackAlias,
+          allAliases,
+        );
+        return {
+          aliasChain: [...fallbackResolution.aliasChain, requestedModel],
+          baseModel: requestedModel,
+          resolvedConfig: fallbackResolution.resolvedConfig,
+        };
+      }
+    }
+
+    return {
+      aliasChain: [requestedModel],
+      baseModel: requestedModel,
+      resolvedConfig: {},
+    };
+  }
+
+  private buildModelLevelMap(
+    aliasChain: string[],
+    baseModel: string | undefined,
+  ): Map<string, number> {
+    const modelToLevel = new Map<string, number>();
+    // Global and Model name are both level 0.
+    if (baseModel) {
+      modelToLevel.set(baseModel, 0);
+    }
+    // Alias chain starts at level 1.
+    aliasChain.forEach((name, i) => modelToLevel.set(name, i + 1));
+    return modelToLevel;
+  }
+
+  private findMatchingOverrides(
+    overrides: ModelConfigOverride[],
+    context: ModelConfigKey,
+    modelToLevel: Map<string, number>,
+  ): Array<{
+    specificity: number;
+    level: number;
+    modelConfig: ModelConfig;
+    index: number;
+  }> {
+    return overrides
       .map((override, index) => {
         const matchEntries = Object.entries(override.match);
-        if (matchEntries.length === 0) {
-          return null;
-        }
+        if (matchEntries.length === 0) return null;
 
+        let matchedLevel = 0; // Default to Global
         const isMatch = matchEntries.every(([key, value]) => {
           if (key === 'model') {
-            return value === context.model || value === finalContext.model;
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+            const level = modelToLevel.get(value as string);
+            if (level === undefined) return false;
+            matchedLevel = level;
+            return true;
           }
           if (key === 'overrideScope' && value === 'core') {
-            // The 'core' overrideScope is special. It should match if the
-            // overrideScope is explicitly 'core' or if the overrideScope
-            // is not specified.
             return context.overrideScope === 'core' || !context.overrideScope;
           }
-          return finalContext[key as keyof ModelConfigKey] === value;
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+          return context[key as keyof ModelConfigKey] === value;
         });
 
-        if (isMatch) {
-          return {
-            specificity: matchEntries.length,
-            modelConfig: override.modelConfig,
-            index,
-          };
-        }
-        return null;
+        return isMatch
+          ? {
+              specificity: matchEntries.length,
+              level: matchedLevel,
+              modelConfig: override.modelConfig,
+              index,
+            }
+          : null;
       })
-      .filter((match): match is NonNullable<typeof match> => match !== null);
+      .filter((m): m is NonNullable<typeof m> => m !== null);
+  }
 
-    // The override application logic is designed to be both simple and powerful.
-    // By first sorting all matching overrides by specificity (and then by their
-    // original order as a tie-breaker), we ensure that as we merge the `config`
-    // objects, the settings from the most specific rules are applied last,
-    // correctly overwriting any values from broader, less-specific rules.
-    // This achieves a per-property override effect without complex per-property logic.
+  private sortOverrides(
+    matches: Array<{ specificity: number; level: number; index: number }>,
+  ): void {
     matches.sort((a, b) => {
+      if (a.level !== b.level) {
+        return a.level - b.level;
+      }
       if (a.specificity !== b.specificity) {
         return a.specificity - b.specificity;
       }
       return a.index - b.index;
     });
-
-    // Apply matching overrides
-    for (const match of matches) {
-      if (match.modelConfig.model) {
-        baseModel = match.modelConfig.model;
-      }
-      if (match.modelConfig.generateContentConfig) {
-        resolvedConfig = this.deepMerge(
-          resolvedConfig,
-          match.modelConfig.generateContentConfig,
-        );
-      }
-    }
-
-    return {
-      model: baseModel,
-      generateContentConfig: resolvedConfig,
-    };
   }
 
   getResolvedConfig(context: ModelConfigKey): ResolvedModelConfig {
@@ -195,27 +579,45 @@ export class ModelConfigService {
       );
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
     return {
       model: resolved.model,
       generateContentConfig: resolved.generateContentConfig,
     } as ResolvedModelConfig;
   }
 
-  private isObject(item: unknown): item is Record<string, unknown> {
+  static isObject(item: unknown): item is Record<string, unknown> {
     return !!item && typeof item === 'object' && !Array.isArray(item);
   }
 
-  private deepMerge(
-    config1: GenerateContentConfig | undefined,
-    config2: GenerateContentConfig | undefined,
-  ): Record<string, unknown> {
-    return this.genericDeepMerge(
-      config1 as Record<string, unknown> | undefined,
-      config2 as Record<string, unknown> | undefined,
-    );
+  /**
+   * Merges an override `ModelConfig` into a base `ModelConfig`.
+   * The override's model name takes precedence if provided.
+   * The `generateContentConfig` properties are deeply merged.
+   */
+  static merge(base: ModelConfig, override: ModelConfig): ModelConfig {
+    return {
+      model: override.model ?? base.model,
+      generateContentConfig: ModelConfigService.deepMerge(
+        base.generateContentConfig,
+        override.generateContentConfig,
+      ),
+    };
   }
 
-  private genericDeepMerge(
+  static deepMerge(
+    config1: GenerateContentConfig | undefined,
+    config2: GenerateContentConfig | undefined,
+  ): GenerateContentConfig {
+    return ModelConfigService.genericDeepMerge(
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      config1 as Record<string, unknown> | undefined,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      config2 as Record<string, unknown> | undefined,
+    ) as GenerateContentConfig;
+  }
+
+  private static genericDeepMerge(
     ...objects: Array<Record<string, unknown> | undefined>
   ): Record<string, unknown> {
     return objects.reduce((acc: Record<string, unknown>, obj) => {
@@ -232,11 +634,11 @@ export class ModelConfigService {
         // override the base array.
         // TODO(joshualitt): Consider knobs here, i.e. opt-in to deep merging
         // arrays on a case-by-case basis.
-        if (this.isObject(accValue) && this.isObject(objValue)) {
-          acc[key] = this.deepMerge(
-            accValue as Record<string, unknown>,
-            objValue as Record<string, unknown>,
-          );
+        if (
+          ModelConfigService.isObject(accValue) &&
+          ModelConfigService.isObject(objValue)
+        ) {
+          acc[key] = ModelConfigService.genericDeepMerge(accValue, objValue);
         } else {
           acc[key] = objValue;
         }

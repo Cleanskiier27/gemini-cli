@@ -4,23 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GenerateContentResponse } from '@google/genai';
-import { ApiError } from '@google/genai';
-import { AuthType } from '../core/contentGenerator.js';
+import { ApiError, type GenerateContentResponse } from '@google/genai';
 import {
-  classifyGoogleError,
-  RetryableQuotaError,
   TerminalQuotaError,
+  RetryableQuotaError,
+  ValidationRequiredError,
+  classifyGoogleError,
 } from './googleQuotaErrors.js';
 import { delay, createAbortError } from './delay.js';
 import { debugLogger } from './debugLogger.js';
+import { getErrorStatus, ModelNotFoundError } from './httpErrors.js';
+import type { RetryAvailabilityContext } from '../availability/modelPolicy.js';
 
-const FETCH_FAILED_MESSAGE =
-  'exception TypeError: fetch failed sending request';
-
-export interface HttpError extends Error {
-  status?: number;
-}
+export type { RetryAvailabilityContext };
+export const DEFAULT_MAX_ATTEMPTS = 10;
 
 export interface RetryOptions {
   maxAttempts: number;
@@ -32,17 +29,136 @@ export interface RetryOptions {
     authType?: string,
     error?: unknown,
   ) => Promise<string | boolean | null>;
+  onValidationRequired?: (
+    error: ValidationRequiredError,
+  ) => Promise<'verify' | 'change_auth' | 'cancel'>;
   authType?: string;
   retryFetchErrors?: boolean;
   signal?: AbortSignal;
+  getAvailabilityContext?: () => RetryAvailabilityContext | undefined;
+  onRetry?: (attempt: number, error: unknown, delayMs: number) => void;
 }
 
 const DEFAULT_RETRY_OPTIONS: RetryOptions = {
-  maxAttempts: 3,
+  maxAttempts: DEFAULT_MAX_ATTEMPTS,
   initialDelayMs: 5000,
   maxDelayMs: 30000, // 30 seconds
-  shouldRetryOnError: defaultShouldRetry,
+  shouldRetryOnError: isRetryableError,
 };
+
+const RETRYABLE_NETWORK_CODES = [
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EPIPE',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ERR_SSL_WRONG_VERSION_NUMBER',
+  'EPROTO', // Generic protocol error (often SSL-related)
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'ERR_STREAM_PREMATURE_CLOSE',
+];
+
+// Node.js builds SSL error codes by prepending ERR_SSL_ to the uppercased
+// OpenSSL reason string with spaces replaced by underscores (see
+// TLSWrap::ClearOut in node/src/crypto/crypto_tls.cc). The reason string
+// format varies by OpenSSL version (e.g. ERR_SSL_SSLV3_ALERT_BAD_RECORD_MAC
+// on OpenSSL 1.x, ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC on OpenSSL 3.x), so
+// match the stable suffix instead of enumerating every variant.
+const RETRYABLE_SSL_ERROR_PATTERN = /^ERR_SSL_.*BAD_RECORD_MAC/i;
+
+/**
+ * Returns true if the error code should be retried: either an exact match
+ * against RETRYABLE_NETWORK_CODES, or an SSL BAD_RECORD_MAC variant (the
+ * OpenSSL reason-string portion of the code varies across OpenSSL versions).
+ */
+function isRetryableSslErrorCode(code: string): boolean {
+  return (
+    RETRYABLE_NETWORK_CODES.includes(code) ||
+    RETRYABLE_SSL_ERROR_PATTERN.test(code)
+  );
+}
+
+function getNetworkErrorCode(error: unknown): string | undefined {
+  const getCode = (obj: unknown): string | undefined => {
+    if (typeof obj !== 'object' || obj === null) {
+      return undefined;
+    }
+    if ('code' in obj && typeof (obj as { code: unknown }).code === 'string') {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      return (obj as { code: string }).code;
+    }
+    return undefined;
+  };
+
+  const directCode = getCode(error);
+  if (directCode) {
+    return directCode;
+  }
+
+  // Traverse the cause chain to find error codes (SSL errors are often nested)
+  let current: unknown = error;
+  const maxDepth = 5; // Prevent infinite loops in case of circular references
+  for (let depth = 0; depth < maxDepth; depth++) {
+    if (
+      typeof current !== 'object' ||
+      current === null ||
+      !('cause' in current)
+    ) {
+      break;
+    }
+    current = (current as { cause: unknown }).cause;
+    const code = getCode(current);
+    if (code) {
+      return code;
+    }
+  }
+
+  return undefined;
+}
+
+export const FETCH_FAILED_MESSAGE = 'fetch failed';
+export const INCOMPLETE_JSON_MESSAGE = 'incomplete json segment';
+
+/**
+ * Categorizes an error for retry telemetry purposes.
+ * Returns a safe string without PII.
+ */
+export function getRetryErrorType(error: unknown): string {
+  if (error === 'Invalid content') {
+    return 'INVALID_CONTENT';
+  }
+
+  const errorCode = getNetworkErrorCode(error);
+  if (errorCode && isRetryableSslErrorCode(errorCode)) {
+    return errorCode;
+  }
+
+  if (error instanceof Error) {
+    const lowerMessage = error.message.toLowerCase();
+    if (lowerMessage.includes(FETCH_FAILED_MESSAGE)) {
+      return 'FETCH_FAILED';
+    }
+    if (lowerMessage.includes(INCOMPLETE_JSON_MESSAGE)) {
+      return 'INCOMPLETE_JSON';
+    }
+  }
+
+  const status = getErrorStatus(error);
+  if (status !== undefined) {
+    if (status === 429) return 'QUOTA_EXCEEDED';
+    if (status >= 500 && status < 600) return 'SERVER_ERROR';
+    return `HTTP_${status}`;
+  }
+
+  if (error instanceof Error) {
+    return error.name;
+  }
+
+  return 'UNKNOWN';
+}
 
 /**
  * Default predicate function to determine if a retry should be attempted.
@@ -51,32 +167,85 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
  * @param retryFetchErrors Whether to retry on specific fetch errors.
  * @returns True if the error is a transient error, false otherwise.
  */
-function defaultShouldRetry(
+export function isRetryableError(
   error: Error | unknown,
   retryFetchErrors?: boolean,
 ): boolean {
-  if (
-    retryFetchErrors &&
-    error instanceof Error &&
-    error.message.includes(FETCH_FAILED_MESSAGE)
-  ) {
+  // Check for common network error codes
+  const errorCode = getNetworkErrorCode(error);
+  if (errorCode && isRetryableSslErrorCode(errorCode)) {
     return true;
+  }
+
+  if (retryFetchErrors && error instanceof Error) {
+    const lowerMessage = error.message.toLowerCase();
+    // Check for generic fetch failed message or incomplete JSON segment (common stream error)
+    if (
+      lowerMessage.includes(FETCH_FAILED_MESSAGE) ||
+      lowerMessage.includes(INCOMPLETE_JSON_MESSAGE)
+    ) {
+      return true;
+    }
   }
 
   // Priority check for ApiError
   if (error instanceof ApiError) {
     // Explicitly do not retry 400 (Bad Request)
     if (error.status === 400) return false;
-    return error.status === 429 || (error.status >= 500 && error.status < 600);
+    return (
+      error.status === 429 ||
+      error.status === 499 ||
+      (error.status >= 500 && error.status < 600)
+    );
   }
 
   // Check for status using helper (handles other error shapes)
   const status = getErrorStatus(error);
   if (status !== undefined) {
-    return status === 429 || (status >= 500 && status < 600);
+    return status === 429 || status === 499 || (status >= 500 && status < 600);
   }
 
   return false;
+}
+
+/**
+ * Enriches quota-related errors with helpful hints if using a shared Google project
+ * without a dedicated user project set in their environment.
+ */
+function enrichQuotaError(error: Error, authType?: string): Error {
+  const isQuotaError =
+    error instanceof TerminalQuotaError ||
+    error instanceof RetryableQuotaError ||
+    error.name === 'TerminalQuotaError' ||
+    error.name === 'RetryableQuotaError';
+
+  if (
+    isQuotaError &&
+    (authType === 'oauth-personal' ||
+      authType === 'compute-default-credentials' ||
+      authType === 'LOGIN_WITH_GOOGLE' ||
+      authType === 'COMPUTE_ADC')
+  ) {
+    const hasUserProject = !!(
+      process.env['GOOGLE_CLOUD_PROJECT'] ||
+      process.env['GOOGLE_CLOUD_PROJECT_ID']
+    );
+    if (!hasUserProject) {
+      const enrichment =
+        '\n\n💡 Tip: The shared Google Cloud project is experiencing high traffic and has hit its quota limits. ' +
+        'To get dedicated, uninterrupted quota, please set your own Google Cloud project by running:\n' +
+        '  gcloud config set project [PROJECT_ID]\n' +
+        'or by setting the GOOGLE_CLOUD_PROJECT environment variable.';
+      if (!error.message.includes('💡 Tip:')) {
+        Object.defineProperty(error, 'message', {
+          value: error.message + enrichment,
+          writable: true,
+          configurable: true,
+        });
+      }
+    }
+  }
+  return error;
 }
 
 /**
@@ -107,20 +276,32 @@ export async function retryWithBackoff<T>(
     initialDelayMs,
     maxDelayMs,
     onPersistent429,
+    onValidationRequired,
     authType,
     shouldRetryOnError,
     shouldRetryOnContent,
     retryFetchErrors,
     signal,
+    getAvailabilityContext,
+    onRetry,
   } = {
     ...DEFAULT_RETRY_OPTIONS,
+    shouldRetryOnError: isRetryableError,
     ...cleanOptions,
   };
 
+  const getCurrentMaxAttempts = () =>
+    getAvailabilityContext?.()?.policy.maxAttempts ?? maxAttempts;
+
   let attempt = 0;
   let currentDelay = initialDelayMs;
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+  };
 
-  while (attempt < maxAttempts) {
+  while (attempt < getCurrentMaxAttempts()) {
     if (signal?.aborted) {
       throw createAbortError();
     }
@@ -130,13 +311,23 @@ export async function retryWithBackoff<T>(
 
       if (
         shouldRetryOnContent &&
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
         shouldRetryOnContent(result as GenerateContentResponse)
       ) {
+        throwIfAborted();
         const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
         const delayWithJitter = Math.max(0, currentDelay + jitter);
+        if (onRetry) {
+          onRetry(attempt, new Error('Invalid content'), delayWithJitter);
+        }
         await delay(delayWithJitter, signal);
         currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         continue;
+      }
+
+      const successContext = getAvailabilityContext?.();
+      if (successContext) {
+        successContext.service.markHealthy(successContext.policy.model);
       }
 
       return result;
@@ -144,11 +335,17 @@ export async function retryWithBackoff<T>(
       if (error instanceof Error && error.name === 'AbortError') {
         throw error;
       }
+      throwIfAborted();
 
       const classifiedError = classifyGoogleError(error);
 
-      if (classifiedError instanceof TerminalQuotaError) {
-        if (onPersistent429 && authType === AuthType.LOGIN_WITH_GOOGLE) {
+      const errorCode = getErrorStatus(error);
+
+      if (
+        classifiedError instanceof TerminalQuotaError ||
+        classifiedError instanceof ModelNotFoundError
+      ) {
+        if (onPersistent429) {
           try {
             const fallbackModel = await onPersistent429(
               authType,
@@ -163,12 +360,43 @@ export async function retryWithBackoff<T>(
             debugLogger.warn('Fallback to Flash model failed:', fallbackError);
           }
         }
-        throw classifiedError; // Throw if no fallback or fallback failed.
+        // Terminal/not_found already recorded; nothing else to mark here.
+        throw classifiedError instanceof Error
+          ? enrichQuotaError(classifiedError, authType)
+          : classifiedError; // Throw if no fallback or fallback failed.
       }
 
-      if (classifiedError instanceof RetryableQuotaError) {
-        if (attempt >= maxAttempts) {
-          if (onPersistent429 && authType === AuthType.LOGIN_WITH_GOOGLE) {
+      // Handle ValidationRequiredError - user needs to verify before proceeding
+      if (classifiedError instanceof ValidationRequiredError) {
+        if (onValidationRequired) {
+          try {
+            const intent = await onValidationRequired(classifiedError);
+            if (intent === 'verify') {
+              // User verified, retry the request
+              attempt = 0;
+              currentDelay = initialDelayMs;
+              continue;
+            }
+            // 'change_auth' or 'cancel' - mark as handled and throw
+            classifiedError.userHandled = true;
+          } catch (validationError) {
+            debugLogger.warn('Validation handler failed:', validationError);
+          }
+        }
+        throw classifiedError;
+      }
+
+      const is500 =
+        errorCode !== undefined && errorCode >= 500 && errorCode < 600;
+
+      if (classifiedError instanceof RetryableQuotaError || is500) {
+        if (attempt >= getCurrentMaxAttempts()) {
+          const errorMessage =
+            classifiedError instanceof Error ? classifiedError.message : '';
+          debugLogger.warn(
+            `Attempt ${attempt} failed${errorMessage ? `: ${errorMessage}` : ''}. Max attempts reached`,
+          );
+          if (onPersistent429) {
             try {
               const fallbackModel = await onPersistent429(
                 authType,
@@ -180,21 +408,51 @@ export async function retryWithBackoff<T>(
                 continue;
               }
             } catch (fallbackError) {
-              console.warn('Model fallback failed:', fallbackError);
+              debugLogger.warn('Model fallback failed:', fallbackError);
             }
           }
-          throw classifiedError;
+          throw classifiedError instanceof RetryableQuotaError
+            ? enrichQuotaError(classifiedError, authType)
+            : error;
         }
-        console.warn(
-          `Attempt ${attempt} failed: ${classifiedError.message}. Retrying after ${classifiedError.retryDelayMs}ms...`,
-        );
-        await delay(classifiedError.retryDelayMs, signal);
-        continue;
+
+        if (
+          classifiedError instanceof RetryableQuotaError &&
+          classifiedError.retryDelayMs !== undefined
+        ) {
+          currentDelay = Math.max(currentDelay, classifiedError.retryDelayMs);
+          // Positive jitter up to +20% while respecting server minimum delay
+          const jitter = currentDelay * 0.2 * Math.random();
+          const delayWithJitter = currentDelay + jitter;
+          debugLogger.warn(
+            `Attempt ${attempt} failed: ${classifiedError.message}. Retrying after ${Math.round(delayWithJitter)}ms...`,
+          );
+          if (onRetry) {
+            onRetry(attempt, error, delayWithJitter);
+          }
+          await delay(delayWithJitter, signal);
+          currentDelay = Math.min(maxDelayMs, currentDelay * 2);
+          continue;
+        } else {
+          const errorStatus = getErrorStatus(error);
+          logRetryAttempt(attempt, error, errorStatus);
+
+          // Exponential backoff with jitter for non-quota errors
+          const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
+          const delayWithJitter = Math.max(0, currentDelay + jitter);
+          if (onRetry) {
+            onRetry(attempt, error, delayWithJitter);
+          }
+          await delay(delayWithJitter, signal);
+          currentDelay = Math.min(maxDelayMs, currentDelay * 2);
+          continue;
+        }
       }
 
       // Generic retry logic for other errors
       if (
-        attempt >= maxAttempts ||
+        attempt >= getCurrentMaxAttempts() ||
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
         !shouldRetryOnError(error as Error, retryFetchErrors)
       ) {
         throw error;
@@ -206,39 +464,15 @@ export async function retryWithBackoff<T>(
       // Exponential backoff with jitter for non-quota errors
       const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
       const delayWithJitter = Math.max(0, currentDelay + jitter);
+      if (onRetry) {
+        onRetry(attempt, error, delayWithJitter);
+      }
       await delay(delayWithJitter, signal);
       currentDelay = Math.min(maxDelayMs, currentDelay * 2);
     }
   }
 
   throw new Error('Retry attempts exhausted');
-}
-
-/**
- * Extracts the HTTP status code from an error object.
- * @param error The error object.
- * @returns The HTTP status code, or undefined if not found.
- */
-export function getErrorStatus(error: unknown): number | undefined {
-  if (typeof error === 'object' && error !== null) {
-    if ('status' in error && typeof error.status === 'number') {
-      return error.status;
-    }
-    // Check for error.response.status (common in axios errors)
-    if (
-      'response' in error &&
-      typeof (error as { response?: unknown }).response === 'object' &&
-      (error as { response?: unknown }).response !== null
-    ) {
-      const response = (
-        error as { response: { status?: unknown; headers?: unknown } }
-      ).response;
-      if ('status' in response && typeof response.status === 'number') {
-        return response.status;
-      }
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -260,7 +494,7 @@ function logRetryAttempt(
   if (errorStatus === 429) {
     debugLogger.warn(message, error);
   } else if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
-    console.error(message, error);
+    debugLogger.warn(message, error);
   } else if (error instanceof Error) {
     // Fallback for errors that might not have a status but have a message
     if (error.message.includes('429')) {
@@ -269,7 +503,7 @@ function logRetryAttempt(
         error,
       );
     } else if (error.message.match(/5\d{2}/)) {
-      console.error(
+      debugLogger.warn(
         `Attempt ${attempt} failed with 5xx error. Retrying with backoff...`,
         error,
       );

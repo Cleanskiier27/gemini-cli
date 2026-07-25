@@ -28,11 +28,16 @@ function mergeRecursively(
   path: string[] = [],
 ) {
   for (const key of Object.keys(source)) {
+    // JSON.parse can create objects with __proto__ as an own property.
+    // We must skip it to prevent prototype pollution.
     if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
       continue;
     }
-    const newPath = [...path, key];
     const srcValue = source[key];
+    if (srcValue === undefined) {
+      continue;
+    }
+    const newPath = [...path, key];
     const objValue = target[key];
     const mergeStrategy = getMergeStrategyForPath(newPath);
 
@@ -62,6 +67,7 @@ function mergeRecursively(
     } else if (isPlainObject(srcValue)) {
       target[key] = {};
       mergeRecursively(
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
         target[key] as MergeableObject,
         srcValue,
         getMergeStrategyForPath,

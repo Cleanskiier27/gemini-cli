@@ -5,11 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type {
-  OAuthAuthorizationServerMetadata,
-  OAuthProtectedResourceMetadata,
+import {
+  OAuthUtils,
+  type OAuthAuthorizationServerMetadata,
+  type OAuthProtectedResourceMetadata,
 } from './oauth-utils.js';
-import { OAuthUtils } from './oauth-utils.js';
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -28,21 +28,8 @@ describe('OAuthUtils', () => {
   });
 
   describe('buildWellKnownUrls', () => {
-    it('should build standard root-based URLs by default', () => {
+    it('should build RFC 9728 compliant path-based URLs by default', () => {
       const urls = OAuthUtils.buildWellKnownUrls('https://example.com/mcp');
-      expect(urls.protectedResource).toBe(
-        'https://example.com/.well-known/oauth-protected-resource',
-      );
-      expect(urls.authorizationServer).toBe(
-        'https://example.com/.well-known/oauth-authorization-server',
-      );
-    });
-
-    it('should build path-based URLs when includePathSuffix is true', () => {
-      const urls = OAuthUtils.buildWellKnownUrls(
-        'https://example.com/mcp',
-        true,
-      );
       expect(urls.protectedResource).toBe(
         'https://example.com/.well-known/oauth-protected-resource/mcp',
       );
@@ -51,8 +38,21 @@ describe('OAuthUtils', () => {
       );
     });
 
+    it('should build root-based URLs when useRootDiscovery is true', () => {
+      const urls = OAuthUtils.buildWellKnownUrls(
+        'https://example.com/mcp',
+        true,
+      );
+      expect(urls.protectedResource).toBe(
+        'https://example.com/.well-known/oauth-protected-resource',
+      );
+      expect(urls.authorizationServer).toBe(
+        'https://example.com/.well-known/oauth-authorization-server',
+      );
+    });
+
     it('should handle root path correctly', () => {
-      const urls = OAuthUtils.buildWellKnownUrls('https://example.com', true);
+      const urls = OAuthUtils.buildWellKnownUrls('https://example.com');
       expect(urls.protectedResource).toBe(
         'https://example.com/.well-known/oauth-protected-resource',
       );
@@ -62,15 +62,24 @@ describe('OAuthUtils', () => {
     });
 
     it('should handle trailing slash in path', () => {
-      const urls = OAuthUtils.buildWellKnownUrls(
-        'https://example.com/mcp/',
-        true,
-      );
+      const urls = OAuthUtils.buildWellKnownUrls('https://example.com/mcp/');
       expect(urls.protectedResource).toBe(
         'https://example.com/.well-known/oauth-protected-resource/mcp',
       );
       expect(urls.authorizationServer).toBe(
         'https://example.com/.well-known/oauth-authorization-server/mcp',
+      );
+    });
+
+    it('should handle deep paths per RFC 9728', () => {
+      const urls = OAuthUtils.buildWellKnownUrls(
+        'https://app.mintmcp.com/s/g_2lj2CNDoJdf3xnbFeeF6vx/mcp',
+      );
+      expect(urls.protectedResource).toBe(
+        'https://app.mintmcp.com/.well-known/oauth-protected-resource/s/g_2lj2CNDoJdf3xnbFeeF6vx/mcp',
+      );
+      expect(urls.authorizationServer).toBe(
+        'https://app.mintmcp.com/.well-known/oauth-authorization-server/s/g_2lj2CNDoJdf3xnbFeeF6vx/mcp',
       );
     });
   });
@@ -210,6 +219,89 @@ describe('OAuthUtils', () => {
     });
   });
 
+  describe('discoverOAuthConfig', () => {
+    const mockResourceMetadata: OAuthProtectedResourceMetadata = {
+      resource: 'https://example.com/mcp',
+      authorization_servers: ['https://auth.example.com'],
+      bearer_methods_supported: ['header'],
+    };
+
+    const mockAuthServerMetadata: OAuthAuthorizationServerMetadata = {
+      issuer: 'https://auth.example.com',
+      authorization_endpoint: 'https://auth.example.com/authorize',
+      token_endpoint: 'https://auth.example.com/token',
+      scopes_supported: ['read', 'write'],
+    };
+
+    it('should succeed when resource metadata matches server URL', async () => {
+      mockFetch
+        // fetchProtectedResourceMetadata
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockResourceMetadata),
+        })
+        // discoverAuthorizationServerMetadata
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockAuthServerMetadata),
+        });
+
+      const config = await OAuthUtils.discoverOAuthConfig(
+        'https://example.com/mcp',
+      );
+
+      expect(config).toEqual({
+        authorizationUrl: 'https://auth.example.com/authorize',
+        issuer: 'https://auth.example.com',
+        tokenUrl: 'https://auth.example.com/token',
+        scopes: ['read', 'write'],
+      });
+    });
+
+    it('should throw error when resource metadata does not match server URL', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ...mockResourceMetadata,
+            resource: 'https://malicious.com/mcp',
+          }),
+      });
+
+      await expect(
+        OAuthUtils.discoverOAuthConfig('https://example.com/mcp'),
+      ).rejects.toThrow(/does not match expected/);
+    });
+
+    it('should accept equivalent root resources with and without trailing slash', async () => {
+      mockFetch
+        // fetchProtectedResourceMetadata
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              resource: 'https://example.com',
+              authorization_servers: ['https://auth.example.com'],
+              bearer_methods_supported: ['header'],
+            }),
+        })
+        // discoverAuthorizationServerMetadata
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockAuthServerMetadata),
+        });
+
+      await expect(
+        OAuthUtils.discoverOAuthConfig('https://example.com'),
+      ).resolves.toEqual({
+        authorizationUrl: 'https://auth.example.com/authorize',
+        issuer: 'https://auth.example.com',
+        tokenUrl: 'https://auth.example.com/token',
+        scopes: ['read', 'write'],
+      });
+    });
+  });
+
   describe('metadataToOAuthConfig', () => {
     it('should convert metadata to OAuth config', () => {
       const metadata: OAuthAuthorizationServerMetadata = {
@@ -223,6 +315,7 @@ describe('OAuthUtils', () => {
 
       expect(config).toEqual({
         authorizationUrl: 'https://auth.example.com/authorize',
+        issuer: 'https://auth.example.com',
         tokenUrl: 'https://auth.example.com/token',
         scopes: ['read', 'write'],
       });
@@ -238,6 +331,19 @@ describe('OAuthUtils', () => {
       const config = OAuthUtils.metadataToOAuthConfig(metadata);
 
       expect(config.scopes).toEqual([]);
+    });
+
+    it('should use issuer from metadata', () => {
+      const metadata: OAuthAuthorizationServerMetadata = {
+        issuer: 'https://auth.example.com',
+        authorization_endpoint: 'https://auth.example.com/oauth/authorize',
+        token_endpoint: 'https://auth.example.com/token',
+        scopes_supported: ['read', 'write'],
+      };
+
+      const config = OAuthUtils.metadataToOAuthConfig(metadata);
+
+      expect(config.issuer).toBe('https://auth.example.com');
     });
   });
 
@@ -255,6 +361,45 @@ describe('OAuthUtils', () => {
       const header = 'Bearer realm="example"';
       const result = OAuthUtils.parseWWWAuthenticateHeader(header);
       expect(result).toBeNull();
+    });
+  });
+
+  describe('discoverOAuthFromWWWAuthenticate', () => {
+    const mockAuthServerMetadata: OAuthAuthorizationServerMetadata = {
+      issuer: 'https://auth.example.com',
+      authorization_endpoint: 'https://auth.example.com/authorize',
+      token_endpoint: 'https://auth.example.com/token',
+      scopes_supported: ['read', 'write'],
+    };
+
+    it('should accept equivalent root resources with and without trailing slash', async () => {
+      mockFetch
+        // fetchProtectedResourceMetadata(resource_metadata URL)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              resource: 'https://example.com',
+              authorization_servers: ['https://auth.example.com'],
+            }),
+        })
+        // discoverAuthorizationServerMetadata(auth server well-known URL)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockAuthServerMetadata),
+        });
+
+      const result = await OAuthUtils.discoverOAuthFromWWWAuthenticate(
+        'Bearer realm="example", resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
+        'https://example.com/',
+      );
+
+      expect(result).toEqual({
+        authorizationUrl: 'https://auth.example.com/authorize',
+        issuer: 'https://auth.example.com',
+        tokenUrl: 'https://auth.example.com/token',
+        scopes: ['read', 'write'],
+      });
     });
   });
 

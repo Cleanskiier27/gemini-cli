@@ -13,38 +13,71 @@ import { Composer } from '../components/Composer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useFlickerDetector } from '../hooks/useFlickerDetector.js';
-import { useSettings } from '../contexts/SettingsContext.js';
+import { useAlternateBuffer } from '../hooks/useAlternateBuffer.js';
+import { CopyModeWarning } from '../components/CopyModeWarning.js';
+import { BackgroundTaskDisplay } from '../components/BackgroundTaskDisplay.js';
+import { StreamingState } from '../types.js';
+import { useInputState } from '../contexts/InputContext.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
-  const { rootUiRef, terminalHeight } = uiState;
-  const settings = useSettings();
-  useFlickerDetector(rootUiRef, terminalHeight);
+  const { copyModeEnabled } = useInputState();
+  const isAlternateBuffer = useAlternateBuffer();
 
+  const { rootUiRef, terminalHeight } = uiState;
+  useFlickerDetector(rootUiRef, terminalHeight);
+  // If in alternate buffer mode, need to leave room to draw the scrollbar on
+  // the right side of the terminal.
   return (
     <Box
       flexDirection="column"
-      width={uiState.mainAreaWidth}
-      ref={uiState.rootUiRef}
-      height={
-        settings.merged.ui?.useAlternateBuffer ? terminalHeight - 1 : undefined
-      }
+      width={uiState.terminalWidth}
+      height={isAlternateBuffer ? terminalHeight : undefined}
+      paddingBottom={isAlternateBuffer ? 1 : undefined}
       flexShrink={0}
       flexGrow={0}
-      overflow="hidden"
+      ref={uiState.rootUiRef}
     >
       <MainContent />
 
-      <Box flexDirection="column" ref={uiState.mainControlsRef}>
+      {uiState.isBackgroundTaskVisible &&
+        uiState.backgroundTasks.size > 0 &&
+        uiState.activeBackgroundTaskPid &&
+        uiState.backgroundTaskHeight > 0 &&
+        uiState.streamingState !== StreamingState.WaitingForConfirmation && (
+          <Box height={uiState.backgroundTaskHeight} flexShrink={0}>
+            <BackgroundTaskDisplay
+              shells={uiState.backgroundTasks}
+              activePid={uiState.activeBackgroundTaskPid}
+              width={uiState.terminalWidth}
+              height={uiState.backgroundTaskHeight}
+              isFocused={
+                uiState.embeddedShellFocused && !uiState.dialogsVisible
+              }
+              isListOpenProp={uiState.isBackgroundTaskListOpen}
+            />
+          </Box>
+        )}
+      <Box
+        flexDirection="column"
+        ref={uiState.mainControlsRef}
+        flexShrink={0}
+        flexGrow={0}
+        width={uiState.terminalWidth}
+        height={copyModeEnabled ? uiState.stableControlsHeight : undefined}
+      >
         <Notifications />
+        <CopyModeWarning />
 
-        {uiState.dialogsVisible ? (
+        {uiState.customDialog ? (
+          uiState.customDialog
+        ) : uiState.dialogsVisible ? (
           <DialogManager
-            terminalWidth={uiState.mainAreaWidth}
+            terminalWidth={uiState.terminalWidth}
             addItem={uiState.historyManager.addItem}
           />
         ) : (
-          <Composer />
+          <Composer isFocused={true} />
         )}
 
         <ExitWarning />

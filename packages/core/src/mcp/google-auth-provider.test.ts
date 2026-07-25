@@ -6,8 +6,7 @@
 
 import { GoogleAuth } from 'google-auth-library';
 import { GoogleCredentialProvider } from './google-auth-provider.js';
-import type { Mock } from 'vitest';
-import { vi, describe, beforeEach, it, expect } from 'vitest';
+import { vi, describe, beforeEach, it, expect, type Mock } from 'vitest';
 import type { MCPServerConfig } from '../config/config.js';
 
 vi.mock('google-auth-library');
@@ -86,6 +85,7 @@ describe('GoogleCredentialProvider', () => {
     let mockClient: {
       getAccessToken: Mock;
       credentials?: { expiry_date: number | null };
+      quotaProjectId?: string;
     };
 
     beforeEach(() => {
@@ -152,6 +152,61 @@ describe('GoogleCredentialProvider', () => {
       expect(mockGetAccessToken).toHaveBeenCalledTimes(2); // new fetch
 
       vi.useRealTimers();
+    });
+
+    it('should return quota project ID', async () => {
+      mockClient['quotaProjectId'] = 'test-project-id';
+      const quotaProjectId = await provider.getQuotaProjectId();
+      expect(quotaProjectId).toBe('test-project-id');
+    });
+
+    it('should return request headers with quota project ID', async () => {
+      mockClient['quotaProjectId'] = 'test-project-id';
+      const headers = await provider.getRequestHeaders();
+      expect(headers).toEqual({
+        'X-Goog-User-Project': 'test-project-id',
+      });
+    });
+
+    it('should return empty request headers if quota project ID is missing', async () => {
+      mockClient['quotaProjectId'] = undefined;
+      const headers = await provider.getRequestHeaders();
+      expect(headers).toEqual({});
+    });
+
+    it('should prioritize config headers over quota project ID', async () => {
+      mockClient['quotaProjectId'] = 'quota-project-id';
+      const configWithHeaders = {
+        // eslint-disable-next-line @typescript-eslint/no-misused-spread
+        ...validConfig,
+        headers: {
+          'X-Goog-User-Project': 'config-project-id',
+        },
+      };
+      const providerWithHeaders = new GoogleCredentialProvider(
+        configWithHeaders,
+      );
+      const headers = await providerWithHeaders.getRequestHeaders();
+      expect(headers).toEqual({
+        'X-Goog-User-Project': 'config-project-id',
+      });
+    });
+    it('should prioritize config headers over quota project ID (case-insensitive)', async () => {
+      mockClient['quotaProjectId'] = 'quota-project-id';
+      const configWithHeaders = {
+        // eslint-disable-next-line @typescript-eslint/no-misused-spread
+        ...validConfig,
+        headers: {
+          'x-goog-user-project': 'config-project-id',
+        },
+      };
+      const providerWithHeaders = new GoogleCredentialProvider(
+        configWithHeaders,
+      );
+      const headers = await providerWithHeaders.getRequestHeaders();
+      expect(headers).toEqual({
+        'x-goog-user-project': 'config-project-id',
+      });
     });
   });
 });

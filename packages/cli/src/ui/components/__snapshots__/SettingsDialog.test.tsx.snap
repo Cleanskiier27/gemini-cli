@@ -3,34 +3,63 @@
 exports[`SettingsDialog > Initial Rendering > should render settings list with visual indicators 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  > Settings                                                                                      │
 │                                                                                                  │
-│ ▲                                                                                                │
-│ ● Vim Mode                                             false                                     │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ Search to filter                                                                             │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│  ▲                                                                                               │
+│  ● Vim Mode                                                                               false  │
+│    Enable Vim keybindings                                                                        │
 │                                                                                                  │
-│   Enable Prompt Completion                             false                                     │
+│    Default Approval Mode                                                                Default  │
+│    The default approval mode for tool execution. 'default' prompts for approval, 'au…            │
 │                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
+│    Enable Auto Update                                                                      true  │
+│    Enable automatic updates.                                                                     │
 │                                                                                                  │
-│   Session Retention                                    undefined                                 │
+│    Enable Terminal Notifications                                                          false  │
+│    Enable terminal run-event notifications for action-required prompts and session com…          │
 │                                                                                                  │
-│   Enable Session Cleanup                               false                                     │
+│    Terminal Notification Method                                                            Auto  │
+│    How to send terminal notifications.                                                           │
 │                                                                                                  │
-│   Output Format                                        Text                                      │
+│    Enable Plan Mode                                                                        true  │
+│    Enable Plan Mode for read-only safety during planning.                                        │
 │                                                                                                  │
-│   Hide Window Title                                    false                                     │
+│    Plan Directory                                                                     undefined  │
+│    The directory where planning artifacts are stored. If not specified, defaults t…              │
 │                                                                                                  │
-│ ▼                                                                                                │
+│    Plan Model Routing                                                                      true  │
+│    Automatically switch between Pro and Flash models based on Plan Mode status. Uses Pr…         │
 │                                                                                                  │
+│  ▼                                                                                               │
 │                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│   System Settings                                                                                │
+│    Apply To                                                                                      │
+│  ● User Settings                                                                                 │
+│    Workspace Settings                                                                            │
+│    System Settings                                                                               │
 │                                                                                                  │
-│ (Use Enter to select, Tab to change focus, Esc to close)                                         │
+│  (Use Enter to select, Ctrl+L to reset, Tab to change focus, Esc to close)                       │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`SettingsDialog > Initial Rendering > should render the bottom border correctly when height is constrained 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│  > Settings                                                                                      │
+│                                                                                                  │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ ╰─Search to filter─────────────────────────────────────────────────────────────────────────────╯ │
+│  ▲                                                                                               │
+│  ● Vim Mode                                                                               false  │
+│  ▼ Enable Vim keybindings                                                                        │
+│                                                                                                  │
+│    Apply To                                                                                      │
+│  ● User Settings                                                                                 │
+│  (Use Enter to select, Ctrl+L to reset, Tab to change focus, Esc to close)                       │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -38,34 +67,45 @@ exports[`SettingsDialog > Initial Rendering > should render settings list with v
 exports[`SettingsDialog > Snapshot Tests > should render 'accessibility settings enabled' correctly 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  > Settings                                                                                      │
 │                                                                                                  │
-│ ▲                                                                                                │
-│ ● Vim Mode                                             true*                                     │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ Search to filter                                                                             │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│  ▲                                                                                               │
+│  ● Vim Mode                                                                               true*  │
+│    Enable Vim keybindings                                                                        │
 │                                                                                                  │
-│   Enable Prompt Completion                             false                                     │
+│    Default Approval Mode                                                                Default  │
+│    The default approval mode for tool execution. 'default' prompts for approval, 'au…            │
 │                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
+│    Enable Auto Update                                                                      true  │
+│    Enable automatic updates.                                                                     │
 │                                                                                                  │
-│   Session Retention                                    undefined                                 │
+│    Enable Terminal Notifications                                                          false  │
+│    Enable terminal run-event notifications for action-required prompts and session com…          │
 │                                                                                                  │
-│   Enable Session Cleanup                               false                                     │
+│    Terminal Notification Method                                                            Auto  │
+│    How to send terminal notifications.                                                           │
 │                                                                                                  │
-│   Output Format                                        Text                                      │
+│    Enable Plan Mode                                                                        true  │
+│    Enable Plan Mode for read-only safety during planning.                                        │
 │                                                                                                  │
-│   Hide Window Title                                    false                                     │
+│    Plan Directory                                                                     undefined  │
+│    The directory where planning artifacts are stored. If not specified, defaults t…              │
 │                                                                                                  │
-│ ▼                                                                                                │
+│    Plan Model Routing                                                                      true  │
+│    Automatically switch between Pro and Flash models based on Plan Mode status. Uses Pr…         │
 │                                                                                                  │
+│  ▼                                                                                               │
 │                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│   System Settings                                                                                │
+│    Apply To                                                                                      │
+│  ● User Settings                                                                                 │
+│    Workspace Settings                                                                            │
+│    System Settings                                                                               │
 │                                                                                                  │
-│ (Use Enter to select, Tab to change focus, Esc to close)                                         │
+│  (Use Enter to select, Ctrl+L to reset, Tab to change focus, Esc to close)                       │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -73,34 +113,45 @@ exports[`SettingsDialog > Snapshot Tests > should render 'accessibility settings
 exports[`SettingsDialog > Snapshot Tests > should render 'all boolean settings disabled' correctly 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  > Settings                                                                                      │
 │                                                                                                  │
-│ ▲                                                                                                │
-│ ● Vim Mode                                             false*                                    │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ Search to filter                                                                             │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│   Disable Auto Update                                  false*                                    │
+│  ▲                                                                                               │
+│  ● Vim Mode                                                                              false*  │
+│    Enable Vim keybindings                                                                        │
 │                                                                                                  │
-│   Enable Prompt Completion                             false*                                    │
+│    Default Approval Mode                                                                Default  │
+│    The default approval mode for tool execution. 'default' prompts for approval, 'au…            │
 │                                                                                                  │
-│   Debug Keystroke Logging                              false*                                    │
+│    Enable Auto Update                                                                     true*  │
+│    Enable automatic updates.                                                                     │
 │                                                                                                  │
-│   Session Retention                                    undefined                                 │
+│    Enable Terminal Notifications                                                          false  │
+│    Enable terminal run-event notifications for action-required prompts and session com…          │
 │                                                                                                  │
-│   Enable Session Cleanup                               false                                     │
+│    Terminal Notification Method                                                            Auto  │
+│    How to send terminal notifications.                                                           │
 │                                                                                                  │
-│   Output Format                                        Text                                      │
+│    Enable Plan Mode                                                                        true  │
+│    Enable Plan Mode for read-only safety during planning.                                        │
 │                                                                                                  │
-│   Hide Window Title                                    false*                                    │
+│    Plan Directory                                                                     undefined  │
+│    The directory where planning artifacts are stored. If not specified, defaults t…              │
 │                                                                                                  │
-│ ▼                                                                                                │
+│    Plan Model Routing                                                                      true  │
+│    Automatically switch between Pro and Flash models based on Plan Mode status. Uses Pr…         │
 │                                                                                                  │
+│  ▼                                                                                               │
 │                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│   System Settings                                                                                │
+│    Apply To                                                                                      │
+│  ● User Settings                                                                                 │
+│    Workspace Settings                                                                            │
+│    System Settings                                                                               │
 │                                                                                                  │
-│ (Use Enter to select, Tab to change focus, Esc to close)                                         │
+│  (Use Enter to select, Ctrl+L to reset, Tab to change focus, Esc to close)                       │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -108,34 +159,45 @@ exports[`SettingsDialog > Snapshot Tests > should render 'all boolean settings d
 exports[`SettingsDialog > Snapshot Tests > should render 'default state' correctly 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  > Settings                                                                                      │
 │                                                                                                  │
-│ ▲                                                                                                │
-│ ● Vim Mode                                             false                                     │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ Search to filter                                                                             │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│  ▲                                                                                               │
+│  ● Vim Mode                                                                               false  │
+│    Enable Vim keybindings                                                                        │
 │                                                                                                  │
-│   Enable Prompt Completion                             false                                     │
+│    Default Approval Mode                                                                Default  │
+│    The default approval mode for tool execution. 'default' prompts for approval, 'au…            │
 │                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
+│    Enable Auto Update                                                                      true  │
+│    Enable automatic updates.                                                                     │
 │                                                                                                  │
-│   Session Retention                                    undefined                                 │
+│    Enable Terminal Notifications                                                          false  │
+│    Enable terminal run-event notifications for action-required prompts and session com…          │
 │                                                                                                  │
-│   Enable Session Cleanup                               false                                     │
+│    Terminal Notification Method                                                            Auto  │
+│    How to send terminal notifications.                                                           │
 │                                                                                                  │
-│   Output Format                                        Text                                      │
+│    Enable Plan Mode                                                                        true  │
+│    Enable Plan Mode for read-only safety during planning.                                        │
 │                                                                                                  │
-│   Hide Window Title                                    false                                     │
+│    Plan Directory                                                                     undefined  │
+│    The directory where planning artifacts are stored. If not specified, defaults t…              │
 │                                                                                                  │
-│ ▼                                                                                                │
+│    Plan Model Routing                                                                      true  │
+│    Automatically switch between Pro and Flash models based on Plan Mode status. Uses Pr…         │
 │                                                                                                  │
+│  ▼                                                                                               │
 │                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│   System Settings                                                                                │
+│    Apply To                                                                                      │
+│  ● User Settings                                                                                 │
+│    Workspace Settings                                                                            │
+│    System Settings                                                                               │
 │                                                                                                  │
-│ (Use Enter to select, Tab to change focus, Esc to close)                                         │
+│  (Use Enter to select, Ctrl+L to reset, Tab to change focus, Esc to close)                       │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -143,34 +205,45 @@ exports[`SettingsDialog > Snapshot Tests > should render 'default state' correct
 exports[`SettingsDialog > Snapshot Tests > should render 'file filtering settings configured' correctly 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  > Settings                                                                                      │
 │                                                                                                  │
-│ ▲                                                                                                │
-│ ● Vim Mode                                             false                                     │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ Search to filter                                                                             │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│  ▲                                                                                               │
+│  ● Vim Mode                                                                               false  │
+│    Enable Vim keybindings                                                                        │
 │                                                                                                  │
-│   Enable Prompt Completion                             false                                     │
+│    Default Approval Mode                                                                Default  │
+│    The default approval mode for tool execution. 'default' prompts for approval, 'au…            │
 │                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
+│    Enable Auto Update                                                                      true  │
+│    Enable automatic updates.                                                                     │
 │                                                                                                  │
-│   Session Retention                                    undefined                                 │
+│    Enable Terminal Notifications                                                          false  │
+│    Enable terminal run-event notifications for action-required prompts and session com…          │
 │                                                                                                  │
-│   Enable Session Cleanup                               false                                     │
+│    Terminal Notification Method                                                            Auto  │
+│    How to send terminal notifications.                                                           │
 │                                                                                                  │
-│   Output Format                                        Text                                      │
+│    Enable Plan Mode                                                                        true  │
+│    Enable Plan Mode for read-only safety during planning.                                        │
 │                                                                                                  │
-│   Hide Window Title                                    false                                     │
+│    Plan Directory                                                                     undefined  │
+│    The directory where planning artifacts are stored. If not specified, defaults t…              │
 │                                                                                                  │
-│ ▼                                                                                                │
+│    Plan Model Routing                                                                      true  │
+│    Automatically switch between Pro and Flash models based on Plan Mode status. Uses Pr…         │
 │                                                                                                  │
+│  ▼                                                                                               │
 │                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│   System Settings                                                                                │
+│    Apply To                                                                                      │
+│  ● User Settings                                                                                 │
+│    Workspace Settings                                                                            │
+│    System Settings                                                                               │
 │                                                                                                  │
-│ (Use Enter to select, Tab to change focus, Esc to close)                                         │
+│  (Use Enter to select, Ctrl+L to reset, Tab to change focus, Esc to close)                       │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -178,34 +251,45 @@ exports[`SettingsDialog > Snapshot Tests > should render 'file filtering setting
 exports[`SettingsDialog > Snapshot Tests > should render 'focused on scope selector' correctly 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│   Settings                                                                                       │
+│    Settings                                                                                      │
 │                                                                                                  │
-│ ▲                                                                                                │
-│   Vim Mode                                             false                                     │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ Search to filter                                                                             │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│  ▲                                                                                               │
+│    Vim Mode                                                                               false  │
+│    Enable Vim keybindings                                                                        │
 │                                                                                                  │
-│   Enable Prompt Completion                             false                                     │
+│    Default Approval Mode                                                                Default  │
+│    The default approval mode for tool execution. 'default' prompts for approval, 'au…            │
 │                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
+│    Enable Auto Update                                                                      true  │
+│    Enable automatic updates.                                                                     │
 │                                                                                                  │
-│   Session Retention                                    undefined                                 │
+│    Enable Terminal Notifications                                                          false  │
+│    Enable terminal run-event notifications for action-required prompts and session com…          │
 │                                                                                                  │
-│   Enable Session Cleanup                               false                                     │
+│    Terminal Notification Method                                                            Auto  │
+│    How to send terminal notifications.                                                           │
 │                                                                                                  │
-│   Output Format                                        Text                                      │
+│    Enable Plan Mode                                                                        true  │
+│    Enable Plan Mode for read-only safety during planning.                                        │
 │                                                                                                  │
-│   Hide Window Title                                    false                                     │
+│    Plan Directory                                                                     undefined  │
+│    The directory where planning artifacts are stored. If not specified, defaults t…              │
 │                                                                                                  │
-│ ▼                                                                                                │
+│    Plan Model Routing                                                                      true  │
+│    Automatically switch between Pro and Flash models based on Plan Mode status. Uses Pr…         │
 │                                                                                                  │
+│  ▼                                                                                               │
 │                                                                                                  │
-│ > Apply To                                                                                       │
-│ ● 1. User Settings                                                                               │
-│   2. Workspace Settings                                                                          │
-│   3. System Settings                                                                             │
+│  > Apply To                                                                                      │
+│  ● 1. User Settings                                                                              │
+│    2. Workspace Settings                                                                         │
+│    3. System Settings                                                                            │
 │                                                                                                  │
-│ (Use Enter to select, Tab to change focus, Esc to close)                                         │
+│  (Use Enter to select, Ctrl+L to reset, Tab to change focus, Esc to close)                       │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -213,34 +297,45 @@ exports[`SettingsDialog > Snapshot Tests > should render 'focused on scope selec
 exports[`SettingsDialog > Snapshot Tests > should render 'mixed boolean and number settings' correctly 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  > Settings                                                                                      │
 │                                                                                                  │
-│ ▲                                                                                                │
-│ ● Vim Mode                                             false*                                    │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ Search to filter                                                                             │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│   Disable Auto Update                                  true*                                     │
+│  ▲                                                                                               │
+│  ● Vim Mode                                                                              false*  │
+│    Enable Vim keybindings                                                                        │
 │                                                                                                  │
-│   Enable Prompt Completion                             false                                     │
+│    Default Approval Mode                                                                Default  │
+│    The default approval mode for tool execution. 'default' prompts for approval, 'au…            │
 │                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
+│    Enable Auto Update                                                                    false*  │
+│    Enable automatic updates.                                                                     │
 │                                                                                                  │
-│   Session Retention                                    undefined                                 │
+│    Enable Terminal Notifications                                                          false  │
+│    Enable terminal run-event notifications for action-required prompts and session com…          │
 │                                                                                                  │
-│   Enable Session Cleanup                               false                                     │
+│    Terminal Notification Method                                                            Auto  │
+│    How to send terminal notifications.                                                           │
 │                                                                                                  │
-│   Output Format                                        Text                                      │
+│    Enable Plan Mode                                                                        true  │
+│    Enable Plan Mode for read-only safety during planning.                                        │
 │                                                                                                  │
-│   Hide Window Title                                    false*                                    │
+│    Plan Directory                                                                     undefined  │
+│    The directory where planning artifacts are stored. If not specified, defaults t…              │
 │                                                                                                  │
-│ ▼                                                                                                │
+│    Plan Model Routing                                                                      true  │
+│    Automatically switch between Pro and Flash models based on Plan Mode status. Uses Pr…         │
 │                                                                                                  │
+│  ▼                                                                                               │
 │                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│   System Settings                                                                                │
+│    Apply To                                                                                      │
+│  ● User Settings                                                                                 │
+│    Workspace Settings                                                                            │
+│    System Settings                                                                               │
 │                                                                                                  │
-│ (Use Enter to select, Tab to change focus, Esc to close)                                         │
+│  (Use Enter to select, Ctrl+L to reset, Tab to change focus, Esc to close)                       │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -248,34 +343,45 @@ exports[`SettingsDialog > Snapshot Tests > should render 'mixed boolean and numb
 exports[`SettingsDialog > Snapshot Tests > should render 'tools and security settings' correctly 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  > Settings                                                                                      │
 │                                                                                                  │
-│ ▲                                                                                                │
-│ ● Vim Mode                                             false                                     │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ Search to filter                                                                             │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│  ▲                                                                                               │
+│  ● Vim Mode                                                                               false  │
+│    Enable Vim keybindings                                                                        │
 │                                                                                                  │
-│   Enable Prompt Completion                             false                                     │
+│    Default Approval Mode                                                                Default  │
+│    The default approval mode for tool execution. 'default' prompts for approval, 'au…            │
 │                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
+│    Enable Auto Update                                                                      true  │
+│    Enable automatic updates.                                                                     │
 │                                                                                                  │
-│   Session Retention                                    undefined                                 │
+│    Enable Terminal Notifications                                                          false  │
+│    Enable terminal run-event notifications for action-required prompts and session com…          │
 │                                                                                                  │
-│   Enable Session Cleanup                               false                                     │
+│    Terminal Notification Method                                                            Auto  │
+│    How to send terminal notifications.                                                           │
 │                                                                                                  │
-│   Output Format                                        Text                                      │
+│    Enable Plan Mode                                                                        true  │
+│    Enable Plan Mode for read-only safety during planning.                                        │
 │                                                                                                  │
-│   Hide Window Title                                    false                                     │
+│    Plan Directory                                                                     undefined  │
+│    The directory where planning artifacts are stored. If not specified, defaults t…              │
 │                                                                                                  │
-│ ▼                                                                                                │
+│    Plan Model Routing                                                                      true  │
+│    Automatically switch between Pro and Flash models based on Plan Mode status. Uses Pr…         │
 │                                                                                                  │
+│  ▼                                                                                               │
 │                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│   System Settings                                                                                │
+│    Apply To                                                                                      │
+│  ● User Settings                                                                                 │
+│    Workspace Settings                                                                            │
+│    System Settings                                                                               │
 │                                                                                                  │
-│ (Use Enter to select, Tab to change focus, Esc to close)                                         │
+│  (Use Enter to select, Ctrl+L to reset, Tab to change focus, Esc to close)                       │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -283,34 +389,45 @@ exports[`SettingsDialog > Snapshot Tests > should render 'tools and security set
 exports[`SettingsDialog > Snapshot Tests > should render 'various boolean settings enabled' correctly 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
-│ > Settings                                                                                       │
+│  > Settings                                                                                      │
 │                                                                                                  │
-│ ▲                                                                                                │
-│ ● Vim Mode                                             true*                                     │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ Search to filter                                                                             │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│   Disable Auto Update                                  true*                                     │
+│  ▲                                                                                               │
+│  ● Vim Mode                                                                               true*  │
+│    Enable Vim keybindings                                                                        │
 │                                                                                                  │
-│   Enable Prompt Completion                             true*                                     │
+│    Default Approval Mode                                                                Default  │
+│    The default approval mode for tool execution. 'default' prompts for approval, 'au…            │
 │                                                                                                  │
-│   Debug Keystroke Logging                              true*                                     │
+│    Enable Auto Update                                                                    false*  │
+│    Enable automatic updates.                                                                     │
 │                                                                                                  │
-│   Session Retention                                    undefined                                 │
+│    Enable Terminal Notifications                                                          false  │
+│    Enable terminal run-event notifications for action-required prompts and session com…          │
 │                                                                                                  │
-│   Enable Session Cleanup                               false                                     │
+│    Terminal Notification Method                                                            Auto  │
+│    How to send terminal notifications.                                                           │
 │                                                                                                  │
-│   Output Format                                        Text                                      │
+│    Enable Plan Mode                                                                        true  │
+│    Enable Plan Mode for read-only safety during planning.                                        │
 │                                                                                                  │
-│   Hide Window Title                                    true*                                     │
+│    Plan Directory                                                                     undefined  │
+│    The directory where planning artifacts are stored. If not specified, defaults t…              │
 │                                                                                                  │
-│ ▼                                                                                                │
+│    Plan Model Routing                                                                      true  │
+│    Automatically switch between Pro and Flash models based on Plan Mode status. Uses Pr…         │
 │                                                                                                  │
+│  ▼                                                                                               │
 │                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│   System Settings                                                                                │
+│    Apply To                                                                                      │
+│  ● User Settings                                                                                 │
+│    Workspace Settings                                                                            │
+│    System Settings                                                                               │
 │                                                                                                  │
-│ (Use Enter to select, Tab to change focus, Esc to close)                                         │
+│  (Use Enter to select, Ctrl+L to reset, Tab to change focus, Esc to close)                       │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;

@@ -28,12 +28,18 @@ vi.mock('node:fs', () => ({
     readFile: vi.fn(),
     rm: vi.fn(),
   },
+  createWriteStream: vi.fn(() => ({
+    on: vi.fn(),
+    write: vi.fn(),
+    end: vi.fn(),
+  })),
 }));
 vi.mock('node:os');
 vi.mock('node:path');
 vi.mock('../utils/events.js', () => ({
   coreEvents: {
     emitFeedback: vi.fn(),
+    emitConsoleLog: vi.fn(),
   },
 }));
 
@@ -173,6 +179,62 @@ describe('OAuthCredentialStorage', () => {
 
       expect(result).toEqual(mockCredentials);
     });
+
+    it('should return null and log a warning if the migration file contains invalid JSON', async () => {
+      vi.spyOn(mockHybridTokenStorage, 'getCredentials').mockResolvedValue(
+        null,
+      );
+      vi.spyOn(fs, 'readFile').mockResolvedValue('invalid json');
+
+      const result = await OAuthCredentialStorage.loadCredentials();
+
+      expect(result).toBeNull();
+      expect(coreEvents.emitFeedback).toHaveBeenCalledWith(
+        'warning',
+        expect.stringContaining('Corrupted OAuth credential file'),
+      );
+    });
+
+    it('should not delete the old file if saving migrated credentials fails', async () => {
+      vi.spyOn(mockHybridTokenStorage, 'getCredentials').mockResolvedValue(
+        null,
+      );
+      vi.spyOn(fs, 'readFile').mockResolvedValue(
+        JSON.stringify(mockCredentials),
+      );
+      vi.spyOn(mockHybridTokenStorage, 'setCredentials').mockRejectedValue(
+        new Error('Save failed'),
+      );
+
+      await expect(OAuthCredentialStorage.loadCredentials()).rejects.toThrow(
+        'Failed to load OAuth credentials',
+      );
+
+      expect(fs.rm).not.toHaveBeenCalled();
+    });
+
+    it('should return credentials even if access_token is missing from storage', async () => {
+      const partialMcpCredentials = {
+        ...mockMcpCredentials,
+        token: {
+          ...mockMcpCredentials.token,
+          accessToken: undefined,
+        },
+      };
+      vi.spyOn(mockHybridTokenStorage, 'getCredentials').mockResolvedValue(
+        partialMcpCredentials,
+      );
+
+      const result = await OAuthCredentialStorage.loadCredentials();
+
+      expect(result).toEqual({
+        access_token: undefined,
+        refresh_token: mockCredentials.refresh_token,
+        token_type: mockCredentials.token_type,
+        scope: mockCredentials.scope,
+        expiry_date: mockCredentials.expiry_date,
+      });
+    });
   });
 
   describe('saveCredentials', () => {
@@ -181,6 +243,39 @@ describe('OAuthCredentialStorage', () => {
 
       expect(mockHybridTokenStorage.setCredentials).toHaveBeenCalledWith(
         mockMcpCredentials,
+      );
+    });
+
+    it('should merge existing refresh token when new payload lacks one', async () => {
+      const oldCredentials: OAuthCredentials = {
+        serverName: 'main-account',
+        token: {
+          accessToken: 'old-access-token',
+          refreshToken: 'persistent-refresh-token',
+          tokenType: 'Bearer',
+          expiresAt: Date.now() + 3600000,
+          scope: 'email',
+        },
+        updatedAt: Date.now(),
+      };
+      vi.spyOn(mockHybridTokenStorage, 'getCredentials').mockResolvedValue(
+        oldCredentials,
+      );
+
+      const newTokens: Credentials = {
+        access_token: 'new-access-token',
+        expiry_date: Date.now() + 3600000,
+      };
+
+      await OAuthCredentialStorage.saveCredentials(newTokens);
+
+      expect(mockHybridTokenStorage.setCredentials).toHaveBeenCalledWith(
+        expect.objectContaining({
+          token: expect.objectContaining({
+            accessToken: 'new-access-token',
+            refreshToken: 'persistent-refresh-token', // correctly merged
+          }),
+        }),
       );
     });
 
@@ -194,6 +289,28 @@ describe('OAuthCredentialStorage', () => {
       ).rejects.toThrow(
         'Attempted to save credentials without an access token.',
       );
+    });
+
+    it('should handle saving credentials with null or undefined optional fields', async () => {
+      const partialCredentials: Credentials = {
+        access_token: 'only_access_token',
+        refresh_token: null, // test null
+        scope: undefined, // test undefined
+      };
+
+      await OAuthCredentialStorage.saveCredentials(partialCredentials);
+
+      expect(mockHybridTokenStorage.setCredentials).toHaveBeenCalledWith({
+        serverName: 'main-account',
+        token: {
+          accessToken: 'only_access_token',
+          refreshToken: undefined,
+          tokenType: 'Bearer', // default
+          scope: undefined,
+          expiresAt: undefined,
+        },
+        updatedAt: expect.any(Number),
+      });
     });
   });
 

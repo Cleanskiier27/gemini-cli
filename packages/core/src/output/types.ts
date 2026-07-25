@@ -19,9 +19,11 @@ export interface JsonError {
 }
 
 export interface JsonOutput {
+  session_id?: string;
   response?: string;
   stats?: SessionMetrics;
   error?: JsonError;
+  warnings?: string[];
 }
 
 // Streaming JSON event types
@@ -76,12 +78,24 @@ export interface ErrorEvent extends BaseJsonStreamEvent {
   message: string;
 }
 
+export interface ModelStreamStats {
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached: number;
+  input: number;
+}
+
 export interface StreamStats {
   total_tokens: number;
   input_tokens: number;
   output_tokens: number;
+  // Breakdown of input_tokens
+  cached: number;
+  input: number;
   duration_ms: number;
   tool_calls: number;
+  models: Record<string, ModelStreamStats>;
 }
 
 export interface ResultEvent extends BaseJsonStreamEvent {

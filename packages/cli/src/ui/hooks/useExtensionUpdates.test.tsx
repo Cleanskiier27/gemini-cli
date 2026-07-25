@@ -4,13 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createExtension } from '../../test-utils/createExtension.js';
 import { useExtensionUpdates } from './useExtensionUpdates.js';
-import { GEMINI_DIR } from '@google/gemini-cli-core';
+import {
+  GEMINI_DIR,
+  loadAgentsFromDirectory,
+  loadSkillsFromDir,
+} from '@google/gemini-cli-core';
 import { render } from '../../test-utils/render.js';
 import { waitFor } from '../../test-utils/async.js';
 import { MessageType } from '../types.js';
@@ -20,13 +24,29 @@ import {
 } from '../../config/extensions/update.js';
 import { ExtensionUpdateState } from '../state/extensions.js';
 import { ExtensionManager } from '../../config/extension-manager.js';
-import { loadSettings } from '../../config/settings.js';
+import {
+  loadSettings,
+  resetSettingsCacheForTesting,
+} from '../../config/settings.js';
 
 vi.mock('os', async (importOriginal) => {
   const mockedOs = await importOriginal<typeof os>();
   return {
     ...mockedOs,
     homedir: vi.fn().mockReturnValue('/tmp/mock-home'),
+  };
+});
+
+vi.mock('@google/gemini-cli-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@google/gemini-cli-core')>();
+  return {
+    ...actual,
+    homedir: () => os.homedir(),
+    loadAgentsFromDirectory: vi
+      .fn()
+      .mockResolvedValue({ agents: [], errors: [] }),
+    loadSkillsFromDir: vi.fn().mockResolvedValue([]),
   };
 });
 
@@ -42,6 +62,12 @@ describe('useExtensionUpdates', () => {
   let extensionManager: ExtensionManager;
 
   beforeEach(() => {
+    resetSettingsCacheForTesting();
+    vi.mocked(loadAgentsFromDirectory).mockResolvedValue({
+      agents: [],
+      errors: [],
+    });
+    vi.mocked(loadSkillsFromDir).mockResolvedValue([]);
     tempHomeDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'gemini-cli-test-home-'),
     );
@@ -101,13 +127,13 @@ describe('useExtensionUpdates', () => {
       return null;
     }
 
-    render(<TestComponent />);
+    await render(<TestComponent />);
 
     await waitFor(() => {
       expect(addItem).toHaveBeenCalledWith(
         {
           type: MessageType.INFO,
-          text: 'You have 1 extension with an update available, run "/extensions list" for more information.',
+          text: `You have 1 extension with an update available. Run "/extensions update test-extension".`,
         },
         expect.any(Number),
       );
@@ -151,7 +177,7 @@ describe('useExtensionUpdates', () => {
       return null;
     }
 
-    render(<TestComponent />);
+    await render(<TestComponent />);
 
     await waitFor(
       () => {
@@ -229,7 +255,7 @@ describe('useExtensionUpdates', () => {
       return null;
     }
 
-    render(<TestComponent />);
+    await render(<TestComponent />);
 
     await waitFor(
       () => {
@@ -312,14 +338,14 @@ describe('useExtensionUpdates', () => {
       return null;
     }
 
-    render(<TestComponent />);
+    await render(<TestComponent />);
 
     await waitFor(() => {
       expect(addItem).toHaveBeenCalledTimes(1);
       expect(addItem).toHaveBeenCalledWith(
         {
           type: MessageType.INFO,
-          text: 'You have 2 extensions with an update available, run "/extensions list" for more information.',
+          text: `You have 2 extensions with an update available. Run "/extensions update test-extension-1 test-extension-2".`,
         },
         expect.any(Number),
       );

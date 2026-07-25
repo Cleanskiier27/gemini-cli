@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { writeFileSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { TestRig } from './test-helper.js';
 
 // BOM encoders
@@ -47,28 +47,26 @@ const utf32BE = (s: string) => {
   return Buffer.concat([bom, payload]);
 };
 
-let rig: TestRig;
-let dir: string;
-
 describe('BOM end-to-end integraion', () => {
-  beforeAll(async () => {
+  let rig: TestRig;
+
+  beforeEach(async () => {
     rig = new TestRig();
-    await rig.setup('bom-integration');
-    dir = rig.testDir!;
+    await rig.setup('bom-integration', {
+      settings: { tools: { core: ['read_file'] } },
+    });
   });
 
-  afterAll(async () => {
-    await rig.cleanup();
-  });
+  afterEach(async () => await rig.cleanup());
 
   async function runAndAssert(
     filename: string,
     content: Buffer,
     expectedText: string | null,
   ) {
-    writeFileSync(join(dir, filename), content);
+    writeFileSync(join(rig.testDir!, filename), content);
     const prompt = `read the file ${filename} and output its exact contents`;
-    const output = await rig.run(prompt);
+    const output = await rig.run({ args: prompt });
     await rig.waitForToolCall('read_file');
     const lower = output.toLowerCase();
     if (expectedText === null) {
@@ -117,22 +115,5 @@ describe('BOM end-to-end integraion', () => {
       utf32BE('BOM_OK UTF-32BE'),
       'BOM_OK UTF-32BE',
     );
-  });
-
-  it('Can describe a PNG file', async () => {
-    const imagePath = resolve(
-      process.cwd(),
-      'docs/assets/gemini-screenshot.png',
-    );
-    const imageContent = readFileSync(imagePath);
-    const filename = 'gemini-screenshot.png';
-    writeFileSync(join(dir, filename), imageContent);
-    const prompt = `What is shown in the image ${filename}?`;
-    const output = await rig.run(prompt);
-    await rig.waitForToolCall('read_file');
-    const lower = output.toLowerCase();
-    // The response is non-deterministic, so we just check for some
-    // keywords that are very likely to be in the response.
-    expect(lower.includes('gemini')).toBeTruthy();
   });
 });

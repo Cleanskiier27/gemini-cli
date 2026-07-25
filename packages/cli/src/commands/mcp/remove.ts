@@ -8,6 +8,7 @@
 import type { CommandModule } from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { debugLogger } from '@google/gemini-cli-core';
+import { exitCli } from '../utils.js';
 
 async function removeMcpServer(
   name: string,
@@ -54,8 +55,11 @@ export const removeCommand: CommandModule = {
         choices: ['user', 'project'],
       }),
   handler: async (argv) => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
     await removeMcpServer(argv['name'] as string, {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       scope: argv['scope'] as string,
     });
+    await exitCli();
   },
 };

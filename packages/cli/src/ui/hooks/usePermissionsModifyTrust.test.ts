@@ -16,20 +16,39 @@ import {
 import { act } from 'react';
 import { renderHook } from '../../test-utils/render.js';
 import { usePermissionsModifyTrust } from './usePermissionsModifyTrust.js';
-import { TrustLevel } from '../../config/trustedFolders.js';
+import {
+  TrustLevel,
+  type LoadedTrustedFolders,
+} from '../../config/trustedFolders.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import type { LoadedTrustedFolders } from '../../config/trustedFolders.js';
+import { coreEvents } from '@google/gemini-cli-core';
 
 // Hoist mocks
-const mockedCwd = vi.hoisted(() => vi.fn());
+const mockedCwd = vi.hoisted(() => vi.fn().mockReturnValue('/mock/cwd'));
 const mockedLoadTrustedFolders = vi.hoisted(() => vi.fn());
 const mockedIsWorkspaceTrusted = vi.hoisted(() => vi.fn());
 const mockedUseSettings = vi.hoisted(() => vi.fn());
 
 // Mock modules
-vi.mock('node:process', () => ({
-  cwd: mockedCwd,
-}));
+vi.mock('node:process', () => {
+  const mockProcess = {
+    cwd: mockedCwd,
+    env: {},
+  };
+  return {
+    ...mockProcess,
+    default: mockProcess,
+  };
+});
+
+vi.mock('node:path', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...(actual && typeof actual === 'object' ? actual : {}),
+    resolve: vi.fn((p) => p),
+    join: vi.fn((...args) => args.join('/')),
+  };
+});
 
 vi.mock('../../config/trustedFolders.js', () => ({
   loadTrustedFolders: mockedLoadTrustedFolders,
@@ -73,110 +92,299 @@ describe('usePermissionsModifyTrust', () => {
     vi.resetAllMocks();
   });
 
-  it('should initialize with the correct trust level', () => {
-    mockedLoadTrustedFolders.mockReturnValue({
-      user: { config: { '/test/dir': TrustLevel.TRUST_FOLDER } },
-    } as unknown as LoadedTrustedFolders);
-    mockedIsWorkspaceTrusted.mockReturnValue({
-      isTrusted: true,
-      source: 'file',
+  describe('when targetDirectory is the current workspace', () => {
+    it('should initialize with the correct trust level', async () => {
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: { '/test/dir': TrustLevel.TRUST_FOLDER } },
+      } as unknown as LoadedTrustedFolders);
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, mockedCwd()),
+      );
+
+      expect(result.current.currentTrustLevel).toBe(TrustLevel.TRUST_FOLDER);
     });
 
-    const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
-    );
+    it('should detect inherited trust from parent', async () => {
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: {} },
+        setValue: vi.fn(),
+      } as unknown as LoadedTrustedFolders);
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
 
-    expect(result.current.currentTrustLevel).toBe(TrustLevel.TRUST_FOLDER);
-  });
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, mockedCwd()),
+      );
 
-  it('should detect inherited trust from parent', () => {
-    mockedLoadTrustedFolders.mockReturnValue({
-      user: { config: {} },
-      setValue: vi.fn(),
-    } as unknown as LoadedTrustedFolders);
-    mockedIsWorkspaceTrusted.mockReturnValue({
-      isTrusted: true,
-      source: 'file',
+      expect(result.current.isInheritedTrustFromParent).toBe(true);
+      expect(result.current.isInheritedTrustFromIde).toBe(false);
     });
 
-    const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
-    );
+    it('should detect inherited trust from IDE', async () => {
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: {} }, // No explicit trust
+      } as unknown as LoadedTrustedFolders);
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: true,
+        source: 'ide',
+      });
 
-    expect(result.current.isInheritedTrustFromParent).toBe(true);
-    expect(result.current.isInheritedTrustFromIde).toBe(false);
-  });
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, mockedCwd()),
+      );
 
-  it('should detect inherited trust from IDE', () => {
-    mockedLoadTrustedFolders.mockReturnValue({
-      user: { config: {} }, // No explicit trust
-    } as unknown as LoadedTrustedFolders);
-    mockedIsWorkspaceTrusted.mockReturnValue({
-      isTrusted: true,
-      source: 'ide',
+      expect(result.current.isInheritedTrustFromIde).toBe(true);
+      expect(result.current.isInheritedTrustFromParent).toBe(false);
     });
 
-    const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
-    );
+    it('should set needsRestart but not save when trust changes', async () => {
+      const mockSetValue = vi.fn();
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: {} },
+        setValue: mockSetValue,
+      } as unknown as LoadedTrustedFolders);
 
-    expect(result.current.isInheritedTrustFromIde).toBe(true);
-    expect(result.current.isInheritedTrustFromParent).toBe(false);
+      mockedIsWorkspaceTrusted
+        .mockReturnValueOnce({ isTrusted: false, source: 'file' })
+        .mockReturnValueOnce({ isTrusted: true, source: 'file' });
+
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, mockedCwd()),
+      );
+
+      await act(async () => {
+        await result.current.updateTrustLevel(TrustLevel.TRUST_FOLDER);
+      });
+
+      expect(result.current.needsRestart).toBe(true);
+      expect(mockSetValue).not.toHaveBeenCalled();
+    });
+
+    it('should save immediately if trust does not change', async () => {
+      const mockSetValue = vi.fn();
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: {} },
+        setValue: mockSetValue,
+      } as unknown as LoadedTrustedFolders);
+
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, mockedCwd()),
+      );
+
+      await act(async () => {
+        await result.current.updateTrustLevel(TrustLevel.TRUST_PARENT);
+      });
+
+      expect(result.current.needsRestart).toBe(false);
+      expect(mockSetValue).toHaveBeenCalledWith(
+        '/test/dir',
+        TrustLevel.TRUST_PARENT,
+      );
+      expect(mockOnExit).toHaveBeenCalled();
+    });
+
+    it('should commit the pending trust level change', async () => {
+      const mockSetValue = vi.fn();
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: {} },
+        setValue: mockSetValue,
+      } as unknown as LoadedTrustedFolders);
+
+      mockedIsWorkspaceTrusted
+        .mockReturnValueOnce({ isTrusted: false, source: 'file' })
+        .mockReturnValueOnce({ isTrusted: true, source: 'file' });
+
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, mockedCwd()),
+      );
+
+      await act(async () => {
+        await result.current.updateTrustLevel(TrustLevel.TRUST_FOLDER);
+      });
+
+      expect(result.current.needsRestart).toBe(true);
+
+      await act(async () => {
+        await result.current.commitTrustLevelChange();
+      });
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        '/test/dir',
+        TrustLevel.TRUST_FOLDER,
+      );
+    });
+
+    it('should add warning when setting DO_NOT_TRUST but still trusted by parent', async () => {
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: {} },
+        setValue: vi.fn(),
+      } as unknown as LoadedTrustedFolders);
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, mockedCwd()),
+      );
+
+      await act(async () => {
+        await result.current.updateTrustLevel(TrustLevel.DO_NOT_TRUST);
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: 'warning',
+          text: 'Note: This folder is still trusted because a parent folder is trusted.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('should add warning when setting DO_NOT_TRUST but still trusted by IDE', async () => {
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: {} },
+        setValue: vi.fn(),
+      } as unknown as LoadedTrustedFolders);
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: true,
+        source: 'ide',
+      });
+
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, mockedCwd()),
+      );
+
+      await act(async () => {
+        await result.current.updateTrustLevel(TrustLevel.DO_NOT_TRUST);
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: 'warning',
+          text: 'Note: This folder is still trusted because the connected IDE workspace is trusted.',
+        },
+        expect.any(Number),
+      );
+    });
   });
 
-  it('should set needsRestart but not save when trust changes', () => {
-    const mockSetValue = vi.fn();
+  describe('when targetDirectory is not the current workspace', () => {
+    const otherDirectory = '/other/dir';
+
+    it('should not detect inherited trust', async () => {
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: {} },
+      } as unknown as LoadedTrustedFolders);
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, otherDirectory),
+      );
+
+      expect(result.current.isInheritedTrustFromParent).toBe(false);
+      expect(result.current.isInheritedTrustFromIde).toBe(false);
+    });
+
+    it('should save immediately without needing a restart', async () => {
+      const mockSetValue = vi.fn();
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: {} },
+        setValue: mockSetValue,
+      } as unknown as LoadedTrustedFolders);
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, otherDirectory),
+      );
+
+      await act(async () => {
+        await result.current.updateTrustLevel(TrustLevel.TRUST_FOLDER);
+      });
+
+      expect(result.current.needsRestart).toBe(false);
+      expect(mockSetValue).toHaveBeenCalledWith(
+        otherDirectory,
+        TrustLevel.TRUST_FOLDER,
+      );
+      expect(mockOnExit).toHaveBeenCalled();
+    });
+
+    it('should not add a warning when setting DO_NOT_TRUST', async () => {
+      mockedLoadTrustedFolders.mockReturnValue({
+        user: { config: {} },
+        setValue: vi.fn(),
+      } as unknown as LoadedTrustedFolders);
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+
+      const { result } = await renderHook(() =>
+        usePermissionsModifyTrust(mockOnExit, mockAddItem, otherDirectory),
+      );
+
+      await act(async () => {
+        await result.current.updateTrustLevel(TrustLevel.DO_NOT_TRUST);
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalled();
+    });
+  });
+
+  it('should emit feedback when setValue throws in updateTrustLevel', async () => {
+    const mockSetValue = vi.fn().mockImplementation(() => {
+      throw new Error('test error');
+    });
     mockedLoadTrustedFolders.mockReturnValue({
       user: { config: {} },
       setValue: mockSetValue,
     } as unknown as LoadedTrustedFolders);
 
-    mockedIsWorkspaceTrusted
-      .mockReturnValueOnce({ isTrusted: false, source: 'file' })
-      .mockReturnValueOnce({ isTrusted: true, source: 'file' });
-
-    const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
-    );
-
-    act(() => {
-      result.current.updateTrustLevel(TrustLevel.TRUST_FOLDER);
-    });
-
-    expect(result.current.needsRestart).toBe(true);
-    expect(mockSetValue).not.toHaveBeenCalled();
-  });
-
-  it('should save immediately if trust does not change', () => {
-    const mockSetValue = vi.fn();
-    mockedLoadTrustedFolders.mockReturnValue({
-      user: { config: {} },
-      setValue: mockSetValue,
-    } as unknown as LoadedTrustedFolders);
-
     mockedIsWorkspaceTrusted.mockReturnValue({
       isTrusted: true,
       source: 'file',
     });
 
-    const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
+    const emitFeedbackSpy = vi.spyOn(coreEvents, 'emitFeedback');
+
+    const { result } = await renderHook(() =>
+      usePermissionsModifyTrust(mockOnExit, mockAddItem, mockedCwd()),
     );
 
-    act(() => {
-      result.current.updateTrustLevel(TrustLevel.TRUST_PARENT);
+    await act(async () => {
+      await result.current.updateTrustLevel(TrustLevel.TRUST_PARENT);
     });
 
-    expect(result.current.needsRestart).toBe(false);
-    expect(mockSetValue).toHaveBeenCalledWith(
-      '/test/dir',
-      TrustLevel.TRUST_PARENT,
+    expect(emitFeedbackSpy).toHaveBeenCalledWith(
+      'error',
+      'Failed to save trust settings. Your changes may not persist.',
     );
     expect(mockOnExit).toHaveBeenCalled();
   });
 
-  it('should commit the pending trust level change', () => {
-    const mockSetValue = vi.fn();
+  it('should emit feedback when setValue throws in commitTrustLevelChange', async () => {
+    const mockSetValue = vi.fn().mockImplementation(() => {
+      throw new Error('test error');
+    });
     mockedLoadTrustedFolders.mockReturnValue({
       user: { config: {} },
       setValue: mockSetValue,
@@ -186,77 +394,25 @@ describe('usePermissionsModifyTrust', () => {
       .mockReturnValueOnce({ isTrusted: false, source: 'file' })
       .mockReturnValueOnce({ isTrusted: true, source: 'file' });
 
-    const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
+    const emitFeedbackSpy = vi.spyOn(coreEvents, 'emitFeedback');
+
+    const { result } = await renderHook(() =>
+      usePermissionsModifyTrust(mockOnExit, mockAddItem, mockedCwd()),
     );
 
-    act(() => {
-      result.current.updateTrustLevel(TrustLevel.TRUST_FOLDER);
+    await act(async () => {
+      await result.current.updateTrustLevel(TrustLevel.TRUST_FOLDER);
     });
 
-    expect(result.current.needsRestart).toBe(true);
-
-    act(() => {
-      result.current.commitTrustLevelChange();
+    await act(async () => {
+      const success = await result.current.commitTrustLevelChange();
+      expect(success).toBe(false);
     });
 
-    expect(mockSetValue).toHaveBeenCalledWith(
-      '/test/dir',
-      TrustLevel.TRUST_FOLDER,
+    expect(emitFeedbackSpy).toHaveBeenCalledWith(
+      'error',
+      'Failed to save trust settings. Your changes may not persist.',
     );
-  });
-
-  it('should add warning when setting DO_NOT_TRUST but still trusted by parent', () => {
-    mockedLoadTrustedFolders.mockReturnValue({
-      user: { config: {} },
-      setValue: vi.fn(),
-    } as unknown as LoadedTrustedFolders);
-    mockedIsWorkspaceTrusted.mockReturnValue({
-      isTrusted: true,
-      source: 'file',
-    });
-
-    const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
-    );
-
-    act(() => {
-      result.current.updateTrustLevel(TrustLevel.DO_NOT_TRUST);
-    });
-
-    expect(mockAddItem).toHaveBeenCalledWith(
-      {
-        type: 'warning',
-        text: 'Note: This folder is still trusted because a parent folder is trusted.',
-      },
-      expect.any(Number),
-    );
-  });
-
-  it('should add warning when setting DO_NOT_TRUST but still trusted by IDE', () => {
-    mockedLoadTrustedFolders.mockReturnValue({
-      user: { config: {} },
-      setValue: vi.fn(),
-    } as unknown as LoadedTrustedFolders);
-    mockedIsWorkspaceTrusted.mockReturnValue({
-      isTrusted: true,
-      source: 'ide',
-    });
-
-    const { result } = renderHook(() =>
-      usePermissionsModifyTrust(mockOnExit, mockAddItem),
-    );
-
-    act(() => {
-      result.current.updateTrustLevel(TrustLevel.DO_NOT_TRUST);
-    });
-
-    expect(mockAddItem).toHaveBeenCalledWith(
-      {
-        type: 'warning',
-        text: 'Note: This folder is still trusted because the connected IDE workspace is trusted.',
-      },
-      expect.any(Number),
-    );
+    expect(result.current.needsRestart).toBe(false);
   });
 });

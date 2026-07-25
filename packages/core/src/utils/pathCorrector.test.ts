@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
-import { StandardFileSystemService } from '../services/fileSystemService.js';
+import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { correctPath } from './pathCorrector.js';
 
 describe('pathCorrector', () => {
@@ -20,7 +20,10 @@ describe('pathCorrector', () => {
   let mockConfig: Config;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'path-corrector-test-'));
+    const rawTempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'path-corrector-test-'),
+    );
+    tempDir = fs.realpathSync(rawTempDir);
     rootDir = path.join(tempDir, 'root');
     otherWorkspaceDir = path.join(tempDir, 'other');
     fs.mkdirSync(rootDir, { recursive: true });
@@ -30,7 +33,11 @@ describe('pathCorrector', () => {
       getTargetDir: () => rootDir,
       getWorkspaceContext: () =>
         createMockWorkspaceContext(rootDir, [otherWorkspaceDir]),
-      getFileSystemService: () => new StandardFileSystemService(),
+      getFileService: () => new FileDiscoveryService(rootDir),
+      getFileFilteringOptions: () => ({
+        respectGitIgnore: true,
+        respectGeminiIgnore: true,
+      }),
     } as unknown as Config;
   });
 

@@ -4,25 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@google/gemini-cli-core';
-import { AuthType, debugLogger, OutputFormat } from '@google/gemini-cli-core';
-import { USER_SETTINGS_PATH } from './config/settings.js';
+import {
+  debugLogger,
+  OutputFormat,
+  ExitCodes,
+  getAuthTypeFromEnv,
+  type Config,
+  type AuthType,
+} from '@google/gemini-cli-core';
+import { USER_SETTINGS_PATH, type LoadedSettings } from './config/settings.js';
 import { validateAuthMethod } from './config/auth.js';
-import { type LoadedSettings } from './config/settings.js';
 import { handleError } from './utils/errors.js';
-
-function getAuthTypeFromEnv(): AuthType | undefined {
-  if (process.env['GOOGLE_GENAI_USE_GCA'] === 'true') {
-    return AuthType.LOGIN_WITH_GOOGLE;
-  }
-  if (process.env['GOOGLE_GENAI_USE_VERTEXAI'] === 'true') {
-    return AuthType.USE_VERTEX_AI;
-  }
-  if (process.env['GEMINI_API_KEY']) {
-    return AuthType.USE_GEMINI;
-  }
-  return undefined;
-}
+import { runExitCleanup } from './utils/cleanup.js';
 
 export async function validateNonInteractiveAuth(
   configuredAuthType: AuthType | undefined,
@@ -33,7 +26,7 @@ export async function validateNonInteractiveAuth(
   try {
     const effectiveAuthType = configuredAuthType || getAuthTypeFromEnv();
 
-    const enforcedType = settings.merged.security?.auth?.enforcedType;
+    const enforcedType = settings.merged.security.auth.enforcedType;
     if (enforcedType && effectiveAuthType !== enforcedType) {
       const message = effectiveAuthType
         ? `The enforced authentication type is '${enforcedType}', but the current type is '${effectiveAuthType}'. Please re-authenticate with the correct type.`
@@ -46,27 +39,27 @@ export async function validateNonInteractiveAuth(
       throw new Error(message);
     }
 
-    const authType: AuthType = effectiveAuthType as AuthType;
+    const authType: AuthType = effectiveAuthType;
 
     if (!useExternalAuth) {
-      const err = validateAuthMethod(String(authType));
+      const err = await validateAuthMethod(String(authType));
       if (err != null) {
         throw new Error(err);
       }
     }
 
-    await nonInteractiveConfig.refreshAuth(authType);
-    return nonInteractiveConfig;
+    return authType;
   } catch (error) {
     if (nonInteractiveConfig.getOutputFormat() === OutputFormat.JSON) {
       handleError(
         error instanceof Error ? error : new Error(String(error)),
         nonInteractiveConfig,
-        1,
+        ExitCodes.FATAL_AUTHENTICATION_ERROR,
       );
     } else {
       debugLogger.error(error instanceof Error ? error.message : String(error));
-      process.exit(1);
+      await runExitCleanup();
+      process.exit(ExitCodes.FATAL_AUTHENTICATION_ERROR);
     }
   }
 }

@@ -6,8 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { mcpCommand } from './mcp.js';
-import { type Argv } from 'yargs';
-import yargs from 'yargs';
+import yargs, { type Argv } from 'yargs';
 
 describe('mcp command', () => {
   it('should have correct command definition', () => {
@@ -33,7 +32,7 @@ describe('mcp command', () => {
 
     try {
       await parser.parse('mcp');
-    } catch (_error) {
+    } catch {
       // yargs might throw an error when demandCommand is not met
     }
 
@@ -56,11 +55,12 @@ describe('mcp command', () => {
       command: vi.fn().mockReturnThis(),
       demandCommand: vi.fn().mockReturnThis(),
       version: vi.fn().mockReturnThis(),
+      middleware: vi.fn().mockReturnThis(),
     };
 
     (mcpCommand.builder as (y: Argv) => Argv)(mockYargs as unknown as Argv);
 
-    expect(mockYargs.command).toHaveBeenCalledTimes(3);
+    expect(mockYargs.command).toHaveBeenCalledTimes(5);
 
     // Verify that the specific subcommands are registered
     const commandCalls = mockYargs.command.mock.calls;
@@ -69,6 +69,8 @@ describe('mcp command', () => {
     expect(commandNames).toContain('add <name> <commandOrUrl> [args...]');
     expect(commandNames).toContain('remove <name>');
     expect(commandNames).toContain('list');
+    expect(commandNames).toContain('enable <name>');
+    expect(commandNames).toContain('disable <name>');
 
     expect(mockYargs.demandCommand).toHaveBeenCalledWith(
       1,
