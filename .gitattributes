@@ -22,3 +22,7 @@ Makefile eol=lf
 *.eot binary
 *.ttf binary
 *.otf binary
+
+# Treat generated large JSON test artifacts as binary to avoid line-ending normalization
+# and accidental diff noise when they are added to the repo.
+memory-tests/*.json binary
