@@ -1,0 +1,82 @@
+{
+  "abate": {
+    "partOfSpeech": "verb",
+    "definition": "to become less intense or widespread"
+  },
+  "benevolent": {
+    "partOfSpeech": "adjective",
+    "definition": "well meaning and kindly"
+  },
+  "catalyst": {
+    "partOfSpeech": "noun",
+    "definition": "a substance or event that causes a change to happen more quickly"
+  },
+  "diligent": {
+    "partOfSpeech": "adjective",
+    "definition": "showing careful and persistent effort or work"
+  },
+  "eloquent": {
+    "partOfSpeech": "adjective",
+    "definition": "fluent or persuasive in speaking or writing"
+  },
+  "frugal": {
+    "partOfSpeech": "adjective",
+    "definition": "sparing or economical with regard to money or food"
+  },
+  "gregarious": {
+    "partOfSpeech": "adjective",
+    "definition": "fond of company; sociable"
+  },
+  "hinder": {
+    "partOfSpeech": "verb",
+    "definition": "to create difficulties for someone or something, resulting in delay or obstruction"
+  },
+  "intrepid": {
+    "partOfSpeech": "adjective",
+    "definition": "fearless; adventurous"
+  },
+  "juxtapose": {
+    "partOfSpeech": "verb",
+    "definition": "to place close together for contrasting effect"
+  },
+  "kinetic": {
+    "partOfSpeech": "adjective",
+    "definition": "relating to or resulting from motion"
+  },
+  "lucid": {
+    "partOfSpeech": "adjective",
+    "definition": "expressed clearly; easy to understand"
+  },
+  "meticulous": {
+    "partOfSpeech": "adjective",
+    "definition": "showing great attention to detail; very careful and precise"
+  },
+  "novel": {
+    "partOfSpeech": "adjective",
+    "definition": "new or unusual in an interesting way"
+  },
+  "objective": {
+    "partOfSpeech": "adjective",
+    "definition": "not influenced by personal feelings or opinions in considering and representing facts"
+  },
+  "pragmatic": {
+    "partOfSpeech": "adjective",
+    "definition": "dealing with problems in a practical and sensible way"
+  },
+  "quaint": {
+    "partOfSpeech": "adjective",
+    "definition": "attractively unusual or old-fashioned"
+  },
+  "reliable": {
+    "partOfSpeech": "adjective",
+    "definition": "consistently good in quality or performance; able to be trusted"
+  },
+  "serendipity": {
+    "partOfSpeech": "noun",
+    "definition": "the occurrence of events by chance in a happy or beneficial way"
+  },
+  "tenacious": {
+    "partOfSpeech": "adjective",
+    "definition": "tending to keep a firm hold of something; determined"
+  }
+}
